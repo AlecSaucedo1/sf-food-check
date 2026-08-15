@@ -165,6 +165,40 @@ def _aggregate_legacy(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return output
 
 
+def _coalesce_historical_facilities(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Use one facility identity when the same DBA/address spans historical eras.
+
+    DataSF's 2016-2019 and 2020-2023 datasets use different business identifiers.
+    Without reconciliation, a continuously operating location appears twice in
+    search and chain footprint counts. Exact normalized DBA + street address is the
+    conservative cross-era key; when both eras exist, prefer the 2020-era synthetic
+    permit and attach older inspections to it.
+    """
+    canonical: dict[tuple[str, str], str] = {}
+
+    for row in rows:
+        name_key = _key(row.get("dba"))
+        address_key = _key(row.get("street_address"))
+        permit = str(row.get("permit_number") or "").strip()
+        if not name_key or not address_key or not permit:
+            continue
+        identity = (address_key, name_key)
+        existing = canonical.get(identity)
+        if existing is None or (permit.startswith("H20-") and not existing.startswith("H20-")):
+            canonical[identity] = permit
+
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        name_key = _key(row.get("dba"))
+        address_key = _key(row.get("street_address"))
+        permit = canonical.get((address_key, name_key)) if name_key and address_key else None
+        if permit and permit != row.get("permit_number"):
+            row = dict(row)
+            row["permit_number"] = permit
+        output.append(row)
+    return output
+
+
 def _reconcile_with_current(
     current_rows: list[dict[str, Any]],
     historical_rows: list[dict[str, Any]],
@@ -214,9 +248,9 @@ async def fetch_complete_history(
     """Return one unified DataSF inspection history across all official eras.
 
     Current records remain authoritative. Historical inspections are normalized to
-    the current storage shape and reconciled onto a current permit when the DBA and
-    street address match exactly after normalization. Otherwise they retain a stable
-    synthetic historical permit so the location remains searchable.
+    the current storage shape. The two historical eras are first coalesced by exact
+    normalized DBA + address, then reconciled onto a current permit when that same
+    identity exists in the 2024-present feed.
     """
     current = await fetch_current_all(page_size=page_size, max_rows=max_rows)
     historical_2020_raw = await _fetch_dataset(
@@ -233,5 +267,6 @@ async def fetch_complete_history(
     )
 
     historical = _aggregate_2020(historical_2020_raw) + _aggregate_legacy(legacy_raw)
+    historical = _coalesce_historical_facilities(historical)
     historical = _reconcile_with_current(current, historical)
     return current + historical
