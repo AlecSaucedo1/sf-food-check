@@ -29,9 +29,6 @@ SEVERITY_RULES = [
     (15, "Low", ["certificate", "manager", "permit", "documentation", "label", "signage", "hair", "lighting", "procedure", "plan"], "Mostly administrative, documentation, or lower-immediacy food-safety concern."),
 ]
 
-# Current DataSF rows use grouped California Retail Food Code sections, e.g.
-# "114067(h), 114123, 114143(a, b) - Keep clean ...". The entire code group
-# represents one published violation/finding and must not be split on commas.
 SINGLE_CODE_RE = r"[A-Za-z]?\d{2,}[\d.\-]*(?:\([^)]*\))?"
 CODE_GROUP_RE = rf"{SINGLE_CODE_RE}(?:,\s*{SINGLE_CODE_RE})*"
 GROUPED_FINDING_RE = re.compile(
@@ -147,8 +144,6 @@ def extract_source_violations(raw_row: dict[str, Any] | None, fallback_codes: li
         elif "lowrisk" in nk:
             risk_hint = "Low Risk"
 
-        # The 2024-present DataSF schema uses `violation_codes` for a complete
-        # grouped-code + human-description string. Parse that before generic CSV logic.
         if "violationcodes" in nk or nk in {"violations", "violation"}:
             grouped = parse_grouped_findings(value)
             if grouped:
@@ -207,20 +202,24 @@ def extract_source_violations(raw_row: dict[str, Any] | None, fallback_codes: li
                 "source_field": source_field,
             })
 
-    for raw_value in fallback_codes or []:
-        grouped = parse_grouped_findings(raw_value)
-        if grouped:
-            for item in grouped:
-                results.append({**item, "official_risk_category": None, "source_field": "normalized_violation_codes"})
-            continue
-        code, desc = parse_violation(raw_value)
-        if code or desc:
-            results.append({
-                "code": code or (raw_value if re.fullmatch(SINGLE_CODE_RE, _text(raw_value)) else ""),
-                "official_description": desc or None,
-                "official_risk_category": None,
-                "source_field": "normalized_violation_codes",
-            })
+    # `fallback_codes` comes from the legacy normalized column and may already
+    # have been comma-split. Use it only when the raw DataSF row yielded no
+    # violation findings at all; otherwise it would duplicate/corrupt grouped codes.
+    if not results:
+        for raw_value in fallback_codes or []:
+            grouped = parse_grouped_findings(raw_value)
+            if grouped:
+                for item in grouped:
+                    results.append({**item, "official_risk_category": None, "source_field": "normalized_violation_codes"})
+                continue
+            code, desc = parse_violation(raw_value)
+            if code or desc:
+                results.append({
+                    "code": code or (raw_value if re.fullmatch(SINGLE_CODE_RE, _text(raw_value)) else ""),
+                    "official_description": desc or None,
+                    "official_risk_category": None,
+                    "source_field": "normalized_violation_codes",
+                })
 
     deduped: list[dict[str, Any]] = []
     by_code: dict[str, int] = {}
