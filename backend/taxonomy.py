@@ -16,7 +16,7 @@ CATEGORY_RULES = [
     (["sewage", "wastewater", "potable water", "water supply"], "Water & sewage", "A water or sewage condition could directly affect food safety."),
     (["thaw", "storage", "stored", "covered", "container", "protected from contamination"], "Food storage & protection", "Food storage or protection practices did not fully prevent contamination or unsafe handling."),
     (["plumb", "sink", "drain"], "Plumbing & sinks", "A sink, drain, or plumbing requirement was not met."),
-    (["clean", "floor", "wall", "ceiling", "equipment", "repair", "maintain", "garbage", "refuse", "ventilation"], "Facility cleanliness & maintenance", "A cleaning, maintenance, refuse, ventilation, or facility-condition requirement was not met."),
+    (["clean", "floor", "wall", "ceiling", "equipment", "repair", "maintain", "garbage", "refuse", "ventilation", "litter", "rubbish"], "Facility cleanliness & maintenance", "A cleaning, maintenance, refuse, ventilation, or facility-condition requirement was not met."),
     (["certificate", "manager", "procedure", "haccp", "plan", "permit", "documentation", "label", "signage"], "Food-safety procedures", "A required food-safety procedure, credential, label, permit, or record was missing or incomplete."),
     (["employee", "personal", "glove", "hair"], "Employee practices", "An employee food-safety practice did not meet requirements."),
 ]
@@ -25,9 +25,16 @@ SEVERITY_RULES = [
     (95, "Critical", ["ill employee", "sick employee", "employee illness", "vomit", "diarrhea", "sewage", "wastewater overflow", "unsafe source", "unapproved source", "adulterat", "cross contamination", "cross-contamination", "bare hand", "undercook", "inadequate cooking", "improper cooking", "inadequate reheating", "parasite destruction"], "Direct pathway for pathogens to contaminate food or survive a required kill step."),
     (80, "High", ["cold hold", "hot hold", "temperature", "cooling", "refriger", "handwash", "hand wash", "hand washing", "sanitize", "sanitiz", "food-contact", "food contact", "vermin", "rodent", "cockroach", "pest", "shellstock", "shellfish tag", "potable water", "water supply"], "Strongly associated with contamination or pathogen growth when uncontrolled."),
     (60, "Elevated", ["thaw", "protected from contamination", "food storage", "stored", "covered", "wiping cloth", "utensil", "glove", "plumb", "sink", "drain"], "Can meaningfully increase foodborne-illness risk, depending on the specific condition."),
-    (35, "Moderate", ["clean", "equipment", "garbage", "refuse", "repair", "maintain", "floor", "wall", "ceiling", "ventilation", "employee practice"], "Primarily a sanitation or operational control issue with a less direct illness pathway."),
+    (35, "Moderate", ["clean", "equipment", "garbage", "refuse", "repair", "maintain", "floor", "wall", "ceiling", "ventilation", "employee practice", "litter", "rubbish"], "Primarily a sanitation or operational control issue with a less direct illness pathway."),
     (15, "Low", ["certificate", "manager", "permit", "documentation", "label", "signage", "hair", "lighting", "procedure", "plan"], "Mostly administrative, documentation, or lower-immediacy food-safety concern."),
 ]
+
+SINGLE_CODE_RE = r"[A-Za-z]?\d{2,}[\d.\-]*(?:\([^)]*\))?"
+CODE_GROUP_RE = rf"{SINGLE_CODE_RE}(?:,\s*{SINGLE_CODE_RE})*"
+GROUPED_FINDING_RE = re.compile(
+    rf"(?P<codes>{CODE_GROUP_RE})\s+-\s+(?P<desc>.*?)(?=(?:[,|]\s*)?{CODE_GROUP_RE}\s+-\s+|\Z)",
+    re.S,
+)
 
 
 def _text(value: Any) -> str:
@@ -55,8 +62,7 @@ def _flatten(value: Any) -> list[str]:
     if value in (None, ""):
         return []
     if isinstance(value, dict):
-        # Socrata may return structured objects. Prefer human-facing members.
-        ordered = []
+        ordered: list[str] = []
         for k in ("code", "violation_code", "id", "description", "violation_description", "name", "text", "value"):
             if k in value and value[k] not in (None, ""):
                 ordered.extend(_flatten(value[k]))
@@ -83,35 +89,45 @@ def _split_field(value: Any, *, comma: bool = False) -> list[str]:
     return out
 
 
+def parse_grouped_findings(value: Any) -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    for raw in _flatten(value):
+        for segment in re.split(r"\s*\|\s*", raw):
+            matches = list(GROUPED_FINDING_RE.finditer(segment.strip()))
+            for match in matches:
+                codes = re.sub(r"\s+", " ", match.group("codes").strip())
+                desc = re.sub(r"\s+", " ", match.group("desc").strip().strip(" ,"))
+                if codes and desc:
+                    results.append({"code": codes, "official_description": desc})
+    return results
+
+
 def parse_violation(raw: str | None) -> tuple[str, str]:
     value = _text(raw).strip("[]\"'")
     if not value:
         return "", ""
-    # Common source forms: 103103: description, 103103 - description,
-    # 103103 description, or a code without a description.
-    m = re.match(r"^\s*([A-Za-z]?\d{2,8}(?:\.\d+)?)\s*[:\-–—|]\s*(.+)$", value)
+    grouped = parse_grouped_findings(value)
+    if len(grouped) == 1:
+        return grouped[0]["code"], grouped[0]["official_description"]
+    m = re.match(rf"^\s*({SINGLE_CODE_RE})\s*[:\-–—|]\s*(.+)$", value)
     if m:
         return m.group(1), m.group(2).strip()
-    m = re.match(r"^\s*([A-Za-z]?\d{4,8}(?:\.\d+)?)\s+(.+)$", value)
+    m = re.match(rf"^\s*({SINGLE_CODE_RE})\s+(.+)$", value)
     if m:
         return m.group(1), m.group(2).strip()
-    if re.fullmatch(r"[A-Za-z]?\d{2,8}(?:\.\d+)?", value):
+    if re.fullmatch(SINGLE_CODE_RE, value):
         return value, ""
     return "", value
 
 
 def extract_source_violations(raw_row: dict[str, Any] | None, fallback_codes: list[str] | None = None) -> list[dict[str, Any]]:
-    """Recover violation code/description pairs from a raw DataSF inspection row.
-
-    The current DataSF feed is inspection-grained, so violation information can be
-    stored in several columns or serialized collections. This routine intentionally
-    inspects all violation-named source fields instead of assuming one schema spelling.
-    """
+    """Recover violation code/description pairs from a raw DataSF inspection row."""
     raw_row = raw_row if isinstance(raw_row, dict) else {}
     code_values: list[tuple[str, str]] = []
     desc_values: list[tuple[str, str]] = []
     generic_values: list[tuple[str, str, str | None]] = []
     risk_values: list[str] = []
+    results: list[dict[str, Any]] = []
 
     for field, value in raw_row.items():
         nk = _key(field)
@@ -119,7 +135,23 @@ def extract_source_violations(raw_row: dict[str, Any] | None, fallback_codes: li
             continue
         if "count" in nk or "numberof" in nk or nk.endswith("total"):
             continue
-        if "risk" in nk or "severity" in nk or "category" in nk:
+
+        risk_hint = None
+        if "highrisk" in nk:
+            risk_hint = "High Risk"
+        elif "moderaterisk" in nk:
+            risk_hint = "Moderate Risk"
+        elif "lowrisk" in nk:
+            risk_hint = "Low Risk"
+
+        if "violationcodes" in nk or nk in {"violations", "violation"}:
+            grouped = parse_grouped_findings(value)
+            if grouped:
+                for item in grouped:
+                    results.append({**item, "official_risk_category": risk_hint, "source_field": field})
+                continue
+
+        if ("riskcategory" in nk or "risklevel" in nk or "severity" in nk) and not risk_hint:
             risk_values.extend(_split_field(value, comma=True))
             continue
 
@@ -130,16 +162,11 @@ def extract_source_violations(raw_row: dict[str, Any] | None, fallback_codes: li
         elif is_desc:
             desc_values.extend((v, field) for v in _split_field(value, comma=False))
         else:
-            # A generic `violations` field often contains complete "code: finding"
-            # strings. Keep these together so descriptions containing commas survive.
             for v in _split_field(value, comma=False):
                 code, desc = parse_violation(v)
                 if code or desc:
-                    generic_values.append((v, field, None))
+                    generic_values.append((v, field, risk_hint))
 
-    results: list[dict[str, Any]] = []
-
-    # Pair explicit code and description arrays positionally when available.
     max_pairs = max(len(code_values), len(desc_values))
     for idx in range(max_pairs):
         raw_code = code_values[idx][0] if idx < len(code_values) else ""
@@ -154,14 +181,18 @@ def extract_source_violations(raw_row: dict[str, Any] | None, fallback_codes: li
         risk = risk_values[idx] if idx < len(risk_values) else (risk_values[0] if len(risk_values) == 1 else None)
         if parsed_code or desc:
             results.append({
-                "code": parsed_code or (raw_code if re.fullmatch(r"[A-Za-z]?\d{2,8}(?:\.\d+)?", raw_code) else ""),
+                "code": parsed_code or (raw_code if re.fullmatch(SINGLE_CODE_RE, raw_code) else ""),
                 "official_description": desc or None,
                 "official_risk_category": risk,
                 "source_field": source_field,
             })
 
-    # Add complete entries from generic violation fields.
     for raw_value, source_field, risk in generic_values:
+        grouped = parse_grouped_findings(raw_value)
+        if grouped:
+            for item in grouped:
+                results.append({**item, "official_risk_category": risk, "source_field": source_field})
+            continue
         code, desc = parse_violation(raw_value)
         if code or desc:
             results.append({
@@ -171,18 +202,25 @@ def extract_source_violations(raw_row: dict[str, Any] | None, fallback_codes: li
                 "source_field": source_field,
             })
 
-    # Finally include normalized fallback values that were not represented above.
-    for raw_value in fallback_codes or []:
-        code, desc = parse_violation(raw_value)
-        if code or desc:
-            results.append({
-                "code": code or (raw_value if re.fullmatch(r"[A-Za-z]?\d{2,8}(?:\.\d+)?", _text(raw_value)) else ""),
-                "official_description": desc or None,
-                "official_risk_category": None,
-                "source_field": "normalized_violation_codes",
-            })
+    # `fallback_codes` comes from the legacy normalized column and may already
+    # have been comma-split. Use it only when the raw DataSF row yielded no
+    # violation findings at all; otherwise it would duplicate/corrupt grouped codes.
+    if not results:
+        for raw_value in fallback_codes or []:
+            grouped = parse_grouped_findings(raw_value)
+            if grouped:
+                for item in grouped:
+                    results.append({**item, "official_risk_category": None, "source_field": "normalized_violation_codes"})
+                continue
+            code, desc = parse_violation(raw_value)
+            if code or desc:
+                results.append({
+                    "code": code or (raw_value if re.fullmatch(SINGLE_CODE_RE, _text(raw_value)) else ""),
+                    "official_description": desc or None,
+                    "official_risk_category": None,
+                    "source_field": "normalized_violation_codes",
+                })
 
-    # De-duplicate without losing a richer description for the same code.
     deduped: list[dict[str, Any]] = []
     by_code: dict[str, int] = {}
     seen_desc: set[str] = set()
@@ -247,8 +285,6 @@ def severity(official_description: str | None, official_risk_category: str | Non
             }
 
     official = _text(official_risk_category).lower()
-    # When the source itself provides an official high/moderate/low risk category,
-    # use it only as a conservative floor; never downgrade a text-derived score.
     if "high" in official and base["risk_score"] < 80:
         base.update(risk_score=80, risk_level="High", risk_confidence="high", risk_rationale="The official source identifies this as a high-risk violation directly relevant to public health.")
     elif "moderate" in official and base["risk_score"] < 50:
@@ -268,7 +304,7 @@ def assess_violation(
 ) -> dict[str, Any]:
     parsed_code, parsed_desc = parse_violation(raw)
     desc = _text(official_description) or parsed_desc
-    violation_code = _text(code) or parsed_code or (_text(raw) if re.fullmatch(r"[A-Za-z]?\d{2,8}(?:\.\d+)?", _text(raw)) else "")
+    violation_code = _text(code) or parsed_code or (_text(raw) if re.fullmatch(SINGLE_CODE_RE, _text(raw)) else "")
     category = categorize(desc)
     return {
         "code": violation_code,
