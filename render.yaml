@@ -14,9 +14,9 @@ services:
       - key: USE_LIVE_DATA
         value: "1"
       - key: LIVE_SYNC_ON_START
-        value: "1"
+        value: "0"
       - key: SYNC_BACKGROUND
-        value: "1"
+        value: "0"
       - key: SYNC_INTERVAL_HOURS
         value: "24"
       - key: DATABASE_PATH
