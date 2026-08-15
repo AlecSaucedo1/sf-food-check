@@ -1,46 +1,38 @@
 import httpx
 
 
-def test_external_arsicault_record_probe():
-    upstream = httpx.get(
-        "https://data.sfgov.org/resource/tvy3-wexg.json",
-        params={
-            "$limit": "500",
-            "$where": "upper(dba) like '%ARSICAULT%'",
-            "$order": "permit_number ASC, inspection_date DESC",
-        },
+def _get(dataset, where):
+    response = httpx.get(
+        f"https://data.sfgov.org/resource/{dataset}.json",
+        params={"$limit": "500", "$where": where, "$order": "inspection_date DESC"},
         timeout=30,
     )
-    upstream.raise_for_status()
-    upstream_rows = upstream.json()
+    response.raise_for_status()
+    return response.json()
+
+
+def test_external_arsicault_record_probe():
+    named = _get("tvy3-wexg", "upper(dba) like '%ARSICAULT%'")
+    address_current = _get("tvy3-wexg", "upper(street_address) like '%397%ARGUELLO%'")
+    address_2020 = _get("5tti-66ds", "upper(business_address) like '%397%ARGUELLO%'")
+    address_legacy = _get("pyih-qa8i", "upper(business_address) like '%397%ARGUELLO%'")
 
     live = httpx.get(
         "https://sf-food-check.onrender.com/api/restaurants",
-        params={"q": "Arsicault", "limit": "200"},
+        params={"q": "397 Arguello", "limit": "200"},
         timeout=30,
     )
     live.raise_for_status()
-    live_rows = live.json()
 
-    leaders = httpx.get(
-        "https://sf-food-check.onrender.com/api/leaderboards",
-        params={"limit": "25", "months": "18"},
-        timeout=30,
-    )
-    leaders.raise_for_status()
-    leader_rows = leaders.json()
+    def show(label, rows):
+        print(f"\n{label}")
+        for row in rows:
+            print(row)
 
-    fields = ("permit_number", "dba", "street_address", "inspection_date", "facility_rating_status", "inspection_type")
-    print("\nUPSTREAM ARSICAULT")
-    for row in upstream_rows:
-        print({key: row.get(key) for key in fields})
-    print("UPSTREAM DISTINCT PERMITS", sorted({str(row.get("permit_number") or "") for row in upstream_rows}))
-    print("\nLIVE SEARCH")
-    for row in live_rows:
-        print({key: row.get(key) for key in fields})
-    print("LIVE DISTINCT PERMITS", sorted({str(row.get("permit_number") or "") for row in live_rows}))
-    print("\nARSICAULT LEADERBOARD")
-    for key in ("chains", "highest_risk_chains"):
-        print(key, [row for row in leader_rows.get(key, []) if "ARSICAULT" in str(row.get("name", "")).upper()])
+    show("CURRENT NAMED ARSICAULT", named)
+    show("CURRENT 397 ARGUELLO", address_current)
+    show("2020-2023 397 ARGUELLO", address_2020)
+    show("2016-2019 397 ARGUELLO", address_legacy)
+    show("LIVE SEARCH 397 ARGUELLO", live.json())
 
-    assert False, "diagnostic probe: inspect logged upstream/live Arsicault rows"
+    assert False, "diagnostic probe: inspect current and historical Arguello identity"
