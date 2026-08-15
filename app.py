@@ -12,14 +12,13 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.store import connect, latest_sync_run, list_restaurants, nearby, restaurant_detail, seed_demo
 from backend.sync_service import sync_once
+from backend.taxonomy import assess_inspection, assess_violation
 
 ROOT = Path(__file__).resolve().parent
 ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
 DEFAULT_DB_PATH = "/var/data/inspections.db" if ON_RENDER else str(ROOT / "data" / "inspections.db")
 DB_PATH = os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)
 DEMO_PATH = ROOT / "data" / "demo.json"
-# Render deployments are production/live by default even when the service was created
-# manually instead of through render.yaml. Local development remains demo-first.
 USE_LIVE_DATA = os.getenv("USE_LIVE_DATA", "1" if ON_RENDER else "0") == "1"
 SYNC_BACKGROUND = os.getenv("SYNC_BACKGROUND", "1" if ON_RENDER else "0") == "1"
 SYNC_INTERVAL_HOURS = max(1.0, float(os.getenv("SYNC_INTERVAL_HOURS", "24")))
@@ -30,6 +29,35 @@ def db():
     if not USE_LIVE_DATA:
         seed_demo(con, str(DEMO_PATH))
     return con
+
+
+def add_consumer_risk(result: dict) -> dict:
+    """Add deterministic, non-official risk summaries to inspection details."""
+    for inspection in result.get("inspections", []):
+        existing = inspection.get("violations") or []
+        assessed = []
+        if existing:
+            for v in existing:
+                derived = assess_violation(
+                    v.get("official_description") or v.get("code"),
+                    official_description=v.get("official_description"),
+                    code=v.get("code"),
+                )
+                # Preserve any richer manually imported fields while ensuring the
+                # risk fields and consumer taxonomy are consistently populated.
+                assessed.append({**v, **derived})
+        else:
+            assessed = [assess_violation(raw) for raw in inspection.get("violation_codes", [])]
+
+        inspection["violations"] = assessed
+        inspection["risk"] = assess_inspection(
+            assessed,
+            status=inspection.get("facility_rating_status", ""),
+            violation_count=int(inspection.get("violation_count") or len(assessed)),
+        )
+    if result.get("inspections"):
+        result["latest_risk"] = result["inspections"][0].get("risk")
+    return result
 
 
 async def periodic_sync() -> None:
@@ -55,7 +83,7 @@ async def lifespan(_: FastAPI):
                 await task
 
 
-app = FastAPI(title="SF Food Check API", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="SF Food Check API", version="0.4.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
@@ -104,7 +132,18 @@ def ready():
 def meta():
     with db() as con:
         neighborhoods = [r[0] for r in con.execute("SELECT DISTINCT analysis_neighborhood FROM inspections WHERE analysis_neighborhood<>'' ORDER BY 1")]
-    return {"city": "San Francisco", "official_statuses": ["Pass", "Conditional Pass", "Closure"], "neighborhoods": neighborhoods, "data_source": "San Francisco Department of Public Health / DataSF", "dataset_id": "tvy3-wexg", "dataset_url": "https://data.sfgov.org/d/tvy3-wexg", "report_lookup_url": "https://inspections.myhealthdepartment.com/san-francisco", "comment_policy": "Inspector comments are displayed verbatim only when linked to an official report enrichment record.", "affiliation_disclaimer": "SF Food Check is an independent project and is not affiliated with or endorsed by the City and County of San Francisco."}
+    return {
+        "city": "San Francisco",
+        "official_statuses": ["Pass", "Conditional Pass", "Closure"],
+        "neighborhoods": neighborhoods,
+        "data_source": "San Francisco Department of Public Health / DataSF",
+        "dataset_id": "tvy3-wexg",
+        "dataset_url": "https://data.sfgov.org/d/tvy3-wexg",
+        "report_lookup_url": "https://inspections.myhealthdepartment.com/san-francisco",
+        "comment_policy": "Inspector comments are displayed verbatim only when linked to an official report enrichment record.",
+        "risk_methodology": "Foodborne Illness Risk Index is an independent relative severity indicator based on how directly a published finding can contribute to contamination, pathogen growth, or pathogen survival. It is not a probability and not an official SFDPH score.",
+        "affiliation_disclaimer": "SF Food Check is an independent project and is not affiliated with or endorsed by the City and County of San Francisco.",
+    }
 
 
 @app.get("/api/restaurants")
@@ -119,7 +158,7 @@ def restaurant(permit_number: str):
         result = restaurant_detail(con, permit_number)
     if not result:
         raise HTTPException(status_code=404, detail="Restaurant not found")
-    return result
+    return add_consumer_risk(result)
 
 
 @app.get("/api/nearby")
