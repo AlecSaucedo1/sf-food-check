@@ -22,7 +22,7 @@ DEMO_PATH = ROOT / "data" / "demo.json"
 USE_LIVE_DATA = os.getenv("USE_LIVE_DATA", "1" if ON_RENDER else "0") == "1"
 SYNC_BACKGROUND = os.getenv("SYNC_BACKGROUND", "1" if ON_RENDER else "0") == "1"
 SYNC_INTERVAL_HOURS = max(1.0, float(os.getenv("SYNC_INTERVAL_HOURS", "24")))
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.5.1"
 RISK_MODEL_VERSION = "2026.08.14.2"
 
 
@@ -65,7 +65,6 @@ def add_consumer_risk(result: dict) -> dict:
             code, desc = _violation_key(derived)
             if code and code in code_index:
                 existing = assessed[code_index[code]]
-                # Prefer a record that contains actual official description text.
                 if not existing.get("official_description") and derived.get("official_description"):
                     assessed[code_index[code]] = {**existing, **derived}
                 continue
@@ -136,7 +135,6 @@ async def production_headers(request: Request, call_next):
     response.headers.setdefault("Permissions-Policy", "geolocation=(self), camera=(), microphone=(), payment=(), usb=()")
     response.headers.setdefault("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
     if request.url.path == "/static/sw.js":
-        # A stale service worker can pin an old app.js after a Render deploy.
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     elif request.url.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "public, max-age=60, stale-while-revalidate=300")
