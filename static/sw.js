@@ -1,5 +1,5 @@
-const CACHE='sf-food-check-v5';
-const SHELL=['/','/static/styles.css?v=5','/static/risk.css?v=5','/static/app.js?v=5','/static/icon.svg'];
+const CACHE='sf-food-check-v6';
+const SHELL=['/','/static/styles.css?v=6','/static/risk.css?v=6','/static/app.js?v=6','/static/icon.svg'];
 
 self.addEventListener('install',event=>{
   self.skipWaiting();
@@ -34,8 +34,6 @@ self.addEventListener('fetch',event=>{
     event.respondWith(fetch(event.request));
     return;
   }
-  // HTML, JS and CSS are network-first so a new Render deployment cannot be
-  // hidden indefinitely behind an old PWA shell.
   if(event.request.mode==='navigate'||event.request.destination==='script'||event.request.destination==='style'){
     event.respondWith(networkFirst(event.request));
     return;

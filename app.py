@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.leaderboards import build_leaderboards
 from backend.store import connect, latest_sync_run, list_restaurants, nearby, restaurant_detail, seed_demo
 from backend.sync_service import sync_once
 from backend.taxonomy import assess_inspection, assess_violation
@@ -22,7 +23,7 @@ DEMO_PATH = ROOT / "data" / "demo.json"
 USE_LIVE_DATA = os.getenv("USE_LIVE_DATA", "1" if ON_RENDER else "0") == "1"
 SYNC_BACKGROUND = os.getenv("SYNC_BACKGROUND", "1" if ON_RENDER else "0") == "1"
 SYNC_INTERVAL_HOURS = max(1.0, float(os.getenv("SYNC_INTERVAL_HOURS", "24")))
-APP_VERSION = "0.5.2"
+APP_VERSION = "0.6.0"
 RISK_MODEL_VERSION = "2026.08.14.3"
 
 
@@ -186,6 +187,22 @@ def meta():
         "risk_model_version": RISK_MODEL_VERSION,
         "affiliation_disclaimer": "SF Food Check is an independent project and is not affiliated with or endorsed by the City and County of San Francisco.",
     }
+
+
+@app.get("/api/leaderboards")
+def leaderboards(
+    limit: int = Query(10, ge=1, le=25),
+    months: int = Query(18, ge=6, le=36),
+):
+    with db() as con:
+        return build_leaderboards(
+            con,
+            model_version=RISK_MODEL_VERSION,
+            months=months,
+            minimum_chain_locations=3,
+            minimum_neighborhood_restaurants=25,
+            limit=limit,
+        )
 
 
 @app.get("/api/restaurants")
