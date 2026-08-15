@@ -1,4 +1,10 @@
 (function(){
+  // Match the numeric leaderboard colors to risk model 2026.08.15.4.
+  leaderboardTone=function(score){
+    const n=Number(score||0);
+    return n<20?'low':n<45?'moderate':n<70?'elevated':n<90?'high':'critical';
+  };
+
   function renderLeaderboardPage(data,mode){
     const reverse=mode==='risk';
     const m=data.methodology||{};
