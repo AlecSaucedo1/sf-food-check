@@ -1,4 +1,4 @@
-from backend.data_coverage import _aggregate_2020, _aggregate_legacy, _reconcile_with_current
+from backend.data_coverage import _aggregate_2020, _aggregate_legacy, _coalesce_historical_facilities, _reconcile_with_current
 from backend.store import connect, list_restaurants, upsert_inspections
 
 
@@ -67,6 +67,28 @@ def test_aggregate_legacy_preserves_arsicault_arguello_identity_and_findings():
     assert result[0]["facility_rating_status"] == "Historical"
 
 
+def test_same_historical_facility_across_eras_uses_one_permit():
+    rows = [
+        {
+            "permit_number": "H20-newer",
+            "dba": "ARSICAULT BAKERY",
+            "street_address": "397 ARGUELLO BLVD",
+            "inspection_id": "H20:2023",
+            "inspection_date": "2023-06-23",
+        },
+        {
+            "permit_number": "H16-81264",
+            "dba": "Arsicault Bakery",
+            "street_address": "397 Arguello Blvd",
+            "inspection_id": "H16:2019",
+            "inspection_date": "2019-07-22",
+        },
+    ]
+    result = _coalesce_historical_facilities(rows)
+    assert {row["permit_number"] for row in result} == {"H20-newer"}
+    assert {row["inspection_id"] for row in result} == {"H20:2023", "H16:2019"}
+
+
 def test_historical_rows_reconcile_to_current_permit_only_at_same_name_and_address():
     current = [{
         "permit_number": "102298",
@@ -85,12 +107,20 @@ def test_historical_rows_reconcile_to_current_permit_only_at_same_name_and_addre
     assert result[1]["permit_number"] == "H16-81264"
 
 
-def test_search_returns_four_arsicault_facilities_when_historical_arguello_is_loaded(tmp_path):
+def test_search_returns_four_arsicault_facilities_when_historical_eras_are_loaded(tmp_path):
     current = [
         {"permit_number": "06733269", "dba": "Arsicault Bakery", "street_address": "1070 Bridgeview Way Unit B", "inspection_date": "2026-07-09", "facility_rating_status": "Pass"},
         {"permit_number": "102298", "dba": "Arsicault Bakery", "street_address": "87 McAllister St", "inspection_date": "2026-03-13", "facility_rating_status": "Pass"},
         {"permit_number": "06734504", "dba": "Arsicault Bakery", "street_address": "2565 3rd St Ste 202", "inspection_date": "2026-02-27", "facility_rating_status": "Pass"},
     ]
+    historical_2020 = _aggregate_2020([{
+        "name": "ARSICAULT BAKERY",
+        "address": "397 ARGUELLO BLVD",
+        "inspection_id": "2023-arguello",
+        "date": "2023-06-23T00:00:00.000",
+        "facility_status": "PASS",
+        "inspection_type": "routine",
+    }])
     legacy = _aggregate_legacy([{
         "business_id": "81264",
         "business_name": "Arsicault Bakery",
@@ -103,7 +133,8 @@ def test_search_returns_four_arsicault_facilities_when_historical_arguello_is_lo
         "inspection_score": "100",
         "inspection_type": "Routine - Unscheduled",
     }])
-    rows = current + legacy
+    historical = _coalesce_historical_facilities(historical_2020 + legacy)
+    rows = current + historical
     db_path = str(tmp_path / "coverage.db")
     with connect(db_path) as con:
         upsert_inspections(con, rows)
@@ -113,5 +144,5 @@ def test_search_returns_four_arsicault_facilities_when_historical_arguello_is_lo
         "1070 Bridgeview Way Unit B",
         "87 McAllister St",
         "2565 3rd St Ste 202",
-        "397 Arguello Blvd",
+        "397 ARGUELLO BLVD",
     }
