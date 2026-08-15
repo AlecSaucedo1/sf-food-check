@@ -16,11 +16,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Waiting for deployed API version 0.6.1..."
+          echo "Waiting for deployed API version 0.6.2..."
           health=''
-          for attempt in $(seq 1 30); do
+          for attempt in $(seq 1 40); do
             health=$(curl -fsS --max-time 20 https://sf-food-check.onrender.com/api/health || true)
-            if echo "$health" | grep -q '"app_version":"0.6.1"'; then
+            if echo "$health" | grep -q '"app_version":"0.6.2"'; then
               break
             fi
             sleep 10
@@ -28,11 +28,11 @@ jobs:
 
           echo "--- LIVE HEALTH ---"
           echo "$health" | python -m json.tool || echo "$health"
-          echo "$health" | grep -q '"app_version":"0.6.1"'
+          echo "$health" | grep -q '"app_version":"0.6.2"'
 
           echo "--- LIVE LEADERBOARDS ---"
           start=$(date +%s)
-          curl -fsS --max-time 45 'https://sf-food-check.onrender.com/api/leaderboards?limit=10&months=18' -o /tmp/leaders.json
+          curl -fsS --max-time 15 'https://sf-food-check.onrender.com/api/leaderboards?limit=10&months=18' -o /tmp/leaders.json
           elapsed=$(($(date +%s)-start))
           echo "leaderboard_request_seconds=$elapsed"
           python - <<'PY'
@@ -51,6 +51,7 @@ jobs:
           assert m.get('direction') == 'lower_is_better'
           assert m.get('minimum_chain_locations') == 3
           assert m.get('minimum_neighborhood_restaurants') == 25
+          assert m.get('snapshot_generated_at')
           assert len(chains) > 0
           assert len(neighborhoods) > 0
           assert all(chains[i]['average_risk'] <= chains[i+1]['average_risk'] for i in range(len(chains)-1))
