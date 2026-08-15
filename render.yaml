@@ -18,9 +18,7 @@ services:
       - key: SYNC_BACKGROUND
         value: "0"
       - key: COMPLETE_SYNC_BACKGROUND
-        value: "1"
-      - key: SYNC_START_DELAY_SECONDS
-        value: "8"
+        value: "0"
       - key: SYNC_INTERVAL_HOURS
         value: "24"
       - key: DATABASE_PATH
