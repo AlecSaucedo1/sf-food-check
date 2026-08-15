@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import statistics
+import tempfile
 import unicodedata
 from collections import Counter, defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from .taxonomy import assess_inspection, assess_violation, extract_source_violations, parse_grouped_findings
 
+RISK_MODEL_VERSION = "2026.08.14.3"
 _GENERIC_CHAIN_NAMES = {
     "BAR", "BAKERY", "CAFE", "COFFEE", "DELI", "GRILL", "KITCHEN", "MARKET", "RESTAURANT",
 }
@@ -23,6 +27,10 @@ _CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 
 def _clean_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
+
+
+def leaderboard_snapshot_path(db_path: str) -> str:
+    return str(Path(db_path).with_name("leaderboard_facilities.json"))
 
 
 def chain_identity(dba: str) -> tuple[str, str] | None:
@@ -92,12 +100,6 @@ def _fast_status_only_risk(status: str) -> tuple[int, str]:
 
 
 def _source_findings(data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Use the known current DataSF violation shape before the generic parser.
-
-    This function is only called for inspections with cited violations. Most latest
-    inspections have no violations, so the leaderboard avoids JSON/regex work for
-    the large majority of facilities.
-    """
     try:
         raw = json.loads(data.get("raw_json") or "{}")
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -156,9 +158,6 @@ def _latest_scored_facilities(con, months: int) -> list[dict[str, Any]]:
         status = data["facility_rating_status"]
         published_count = int(data.get("violation_count") or 0)
 
-        # The common case: no cited violations. Avoid JSON parsing and taxonomy
-        # evaluation altogether while preserving the status floors used by the
-        # full inspection model.
         if published_count == 0 and not manual.get(data["inspection_id"]):
             score, level = _fast_status_only_risk(status)
             mapped_count = 0
@@ -167,12 +166,8 @@ def _latest_scored_facilities(con, months: int) -> list[dict[str, Any]]:
             candidates.extend(_source_findings(data))
             assessed = _dedupe_assessed(candidates, assessment_cache)
             mapped_count = sum(1 for item in assessed if item.get("official_description"))
-
-            # A cited violation with no descriptive finding can look artificially safe.
-            # Exclude it from comparative rankings rather than guessing its severity.
             if published_count > 0 and mapped_count == 0:
                 continue
-
             risk = assess_inspection(
                 assessed,
                 status=status,
@@ -196,6 +191,53 @@ def _latest_scored_facilities(con, months: int) -> list[dict[str, Any]]:
     return facilities
 
 
+def refresh_leaderboard_snapshot(db_path: str, *, model_version: str = RISK_MODEL_VERSION) -> dict[str, Any]:
+    """Precompute latest facility risk scores and atomically publish them to disk.
+
+    This deliberately runs during the DataSF sync rather than inside an HTTP request.
+    The previous snapshot remains intact until the replacement file is complete.
+    """
+    from .store import connect
+
+    with connect(db_path) as con:
+        # The current DataSF dataset starts in 2024. A 120-month window comfortably
+        # captures every possible latest rated inspection while keeping the helper generic.
+        facilities = _latest_scored_facilities(con, 120)
+
+    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    payload = {
+        "model_version": model_version,
+        "generated_at": generated_at,
+        "facility_count": len(facilities),
+        "facilities": facilities,
+    }
+    output = Path(leaderboard_snapshot_path(db_path))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix="leaderboards-", suffix=".json", dir=str(output.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+        os.replace(temp_name, output)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+    _CACHE.clear()
+    return {"generated_at": generated_at, "facility_count": len(facilities), "path": str(output)}
+
+
+def _load_snapshot(snapshot_path: str, model_version: str) -> tuple[list[dict[str, Any]], str] | None:
+    path = Path(snapshot_path)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if payload.get("model_version") != model_version or not isinstance(payload.get("facilities"), list):
+        return None
+    return payload["facilities"], str(payload.get("generated_at") or "")
+
+
 def _summary(scores: list[int], statuses: list[str]) -> dict[str, Any]:
     return {
         "average_risk": round(sum(scores) / len(scores), 1),
@@ -213,7 +255,6 @@ def _chain_leaderboard(facilities: list[dict[str, Any]], minimum_locations: int,
         key, label = identity
         group = groups.setdefault(key, {"labels": Counter(), "locations": {}})
         group["labels"][label] += 1
-
         address_key = re.sub(r"[^A-Z0-9]+", "", facility["street_address"].upper()) or facility["permit_number"]
         existing = group["locations"].get(address_key)
         if existing is None or facility["risk_score"] > existing["risk_score"]:
@@ -269,18 +310,29 @@ def build_leaderboards(
     minimum_chain_locations: int = 3,
     minimum_neighborhood_restaurants: int = 25,
     limit: int = 10,
+    snapshot_path: str = "",
 ) -> dict[str, Any]:
-    latest = con.execute("SELECT MAX(inspection_date) FROM inspections").fetchone()[0]
-    row_count = con.execute("SELECT COUNT(*) FROM inspections").fetchone()[0]
+    snapshot = _load_snapshot(snapshot_path, model_version) if snapshot_path else None
+    generated_at = ""
+    if snapshot:
+        all_facilities, generated_at = snapshot
+        cutoff = (date.today() - timedelta(days=round(months * 30.4375))).isoformat()
+        facilities = [item for item in all_facilities if str(item.get("inspection_date") or "") >= cutoff]
+        source_marker: tuple[Any, ...] = (snapshot_path, generated_at, len(all_facilities))
+    else:
+        latest = con.execute("SELECT MAX(inspection_date) FROM inspections").fetchone()[0]
+        row_count = con.execute("SELECT COUNT(*) FROM inspections").fetchone()[0]
+        facilities = _latest_scored_facilities(con, months)
+        source_marker = (latest, row_count)
+
     cache_key = (
-        latest, row_count, model_version, months, minimum_chain_locations,
+        *source_marker, model_version, months, minimum_chain_locations,
         minimum_neighborhood_restaurants, limit,
     )
     cached = _CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    facilities = _latest_scored_facilities(con, months)
     result = {
         "chains": _chain_leaderboard(facilities, minimum_chain_locations, limit),
         "neighborhoods": _neighborhood_leaderboard(facilities, minimum_neighborhood_restaurants, limit),
@@ -291,6 +343,7 @@ def build_leaderboards(
             "minimum_chain_locations": minimum_chain_locations,
             "minimum_neighborhood_restaurants": minimum_neighborhood_restaurants,
             "eligible_facilities": len(facilities),
+            "snapshot_generated_at": generated_at or None,
             "note": "Uses each facility's most recent rated inspection in the window. Cited violations without descriptive findings are excluded from comparative rankings rather than assigned a guessed severity.",
             "model_version": model_version,
         },
