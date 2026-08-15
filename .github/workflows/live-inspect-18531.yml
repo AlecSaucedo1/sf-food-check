@@ -1,4 +1,4 @@
-name: Live inspect permit 18531
+name: Live inspect leaderboards
 
 on:
   push:
@@ -11,16 +11,16 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect deployed API and DataSF source
+      - name: Inspect deployed leaderboard API
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Waiting for deployed API version 0.5.2..."
+          echo "Waiting for deployed API version 0.6.0..."
           health=''
           for attempt in $(seq 1 30); do
             health=$(curl -fsS --max-time 20 https://sf-food-check.onrender.com/api/health || true)
-            if echo "$health" | grep -q '"app_version":"0.5.2"'; then
+            if echo "$health" | grep -q '"app_version":"0.6.0"'; then
               break
             fi
             sleep 10
@@ -28,30 +28,28 @@ jobs:
 
           echo "--- LIVE HEALTH ---"
           echo "$health" | python -m json.tool || echo "$health"
-          echo "$health" | grep -q '"app_version":"0.5.2"'
-          echo "$health" | grep -q '"risk_model_version":"2026.08.14.3"'
+          echo "$health" | grep -q '"app_version":"0.6.0"'
 
-          echo "--- LIVE PERMIT 18531 ---"
-          curl -fsS --max-time 30 https://sf-food-check.onrender.com/api/restaurants/18531 -o /tmp/live.json
+          echo "--- LIVE LEADERBOARDS ---"
+          curl -fsS --max-time 90 'https://sf-food-check.onrender.com/api/leaderboards?limit=10&months=18' -o /tmp/leaders.json
           python - <<'PY'
           import json
-          d=json.load(open('/tmp/live.json'))
-          print('app_version=', d.get('app_version'))
-          print('risk_model_version=', d.get('risk_model_version'))
-          print('restaurant=', d.get('dba'), d.get('street_address'))
-          print('latest_risk=', d.get('latest_risk'))
-          latest=d.get('inspections', [])[0]
-          print('latest inspection=', latest.get('inspection_date'), latest.get('facility_rating_status'))
-          print('published_count=', latest.get('violation_count'), 'display_count=', latest.get('display_violation_count'))
-          print('mapping=', latest.get('mapping'))
-          for v in latest.get('violations', []):
-              print(' violation=', {k:v.get(k) for k in ('code','official_description','normalized_category','risk_score','risk_level','risk_confidence','source_field')})
-          assert d.get('app_version') == '0.5.2'
-          assert d.get('risk_model_version') == '2026.08.14.3'
-          assert latest.get('display_violation_count') == 2
-          assert latest.get('mapping',{}).get('mapped_count') == 2
-          assert d.get('latest_risk',{}).get('risk_score') == 59
-          assert d.get('latest_risk',{}).get('risk_level') == 'Elevated'
-          cats=[v.get('normalized_category') for v in latest.get('violations', [])]
-          assert cats == ['Facility sanitation & pest prevention', 'Facility condition & repair'], cats
+          d=json.load(open('/tmp/leaders.json'))
+          m=d.get('methodology', {})
+          chains=d.get('chains', [])
+          neighborhoods=d.get('neighborhoods', [])
+          print('methodology=', m)
+          print('chains=', len(chains))
+          for i,item in enumerate(chains, 1):
+              print(' chain', i, item)
+          print('neighborhoods=', len(neighborhoods))
+          for i,item in enumerate(neighborhoods, 1):
+              print(' neighborhood', i, item)
+          assert m.get('direction') == 'lower_is_better'
+          assert m.get('minimum_chain_locations') == 3
+          assert m.get('minimum_neighborhood_restaurants') == 25
+          assert len(chains) > 0
+          assert len(neighborhoods) > 0
+          assert all(chains[i]['average_risk'] <= chains[i+1]['average_risk'] for i in range(len(chains)-1))
+          assert all(neighborhoods[i]['average_risk'] <= neighborhoods[i+1]['average_risk'] for i in range(len(neighborhoods)-1))
           PY
