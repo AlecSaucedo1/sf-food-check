@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.leaderboards import build_leaderboards
+from backend.leaderboards import RISK_MODEL_VERSION, build_leaderboards, leaderboard_snapshot_path
 from backend.store import connect, latest_sync_run, list_restaurants, nearby, restaurant_detail, seed_demo
 from backend.sync_service import sync_once
 from backend.taxonomy import assess_inspection, assess_violation
@@ -19,12 +19,12 @@ ROOT = Path(__file__).resolve().parent
 ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
 DEFAULT_DB_PATH = "/var/data/inspections.db" if ON_RENDER else str(ROOT / "data" / "inspections.db")
 DB_PATH = os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)
+LEADERBOARD_SNAPSHOT_PATH = os.getenv("LEADERBOARD_SNAPSHOT_PATH", leaderboard_snapshot_path(DB_PATH))
 DEMO_PATH = ROOT / "data" / "demo.json"
 USE_LIVE_DATA = os.getenv("USE_LIVE_DATA", "1" if ON_RENDER else "0") == "1"
 SYNC_BACKGROUND = os.getenv("SYNC_BACKGROUND", "1" if ON_RENDER else "0") == "1"
 SYNC_INTERVAL_HOURS = max(1.0, float(os.getenv("SYNC_INTERVAL_HOURS", "24")))
-APP_VERSION = "0.6.1"
-RISK_MODEL_VERSION = "2026.08.14.3"
+APP_VERSION = "0.6.2"
 
 
 def db():
@@ -41,12 +41,7 @@ def _violation_key(item: dict) -> tuple[str, str]:
 
 
 def add_consumer_risk(result: dict) -> dict:
-    """Add deterministic, non-official risk summaries to inspection details.
-
-    Manually imported violation records are retained, then supplemented by violation
-    fields recovered from the raw DataSF inspection row. This allows the live site to
-    use DataSF's actual descriptions instead of treating every item as a bare code.
-    """
+    """Add deterministic, non-official risk summaries to inspection details."""
     for inspection in result.get("inspections", []):
         candidates: list[dict] = []
         candidates.extend(inspection.get("violations") or [])
@@ -202,6 +197,7 @@ def leaderboards(
             minimum_chain_locations=3,
             minimum_neighborhood_restaurants=25,
             limit=limit,
+            snapshot_path=LEADERBOARD_SNAPSHOT_PATH,
         )
 
 
