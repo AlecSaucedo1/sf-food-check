@@ -14,10 +14,14 @@ from backend.store import connect, latest_sync_run, list_restaurants, nearby, re
 from backend.sync_service import sync_once
 
 ROOT = Path(__file__).resolve().parent
-DB_PATH = os.getenv("DATABASE_PATH", str(ROOT / "data" / "inspections.db"))
+ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
+DEFAULT_DB_PATH = "/var/data/inspections.db" if ON_RENDER else str(ROOT / "data" / "inspections.db")
+DB_PATH = os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)
 DEMO_PATH = ROOT / "data" / "demo.json"
-USE_LIVE_DATA = os.getenv("USE_LIVE_DATA", "0") == "1"
-SYNC_BACKGROUND = os.getenv("SYNC_BACKGROUND", "0") == "1"
+# Render deployments are production/live by default even when the service was created
+# manually instead of through render.yaml. Local development remains demo-first.
+USE_LIVE_DATA = os.getenv("USE_LIVE_DATA", "1" if ON_RENDER else "0") == "1"
+SYNC_BACKGROUND = os.getenv("SYNC_BACKGROUND", "1" if ON_RENDER else "0") == "1"
 SYNC_INTERVAL_HOURS = max(1.0, float(os.getenv("SYNC_INTERVAL_HOURS", "24")))
 
 
@@ -51,7 +55,7 @@ async def lifespan(_: FastAPI):
                 await task
 
 
-app = FastAPI(title="SF Food Check API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="SF Food Check API", version="0.3.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
