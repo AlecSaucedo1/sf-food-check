@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: sf-food-check
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: ./run.sh
+    healthCheckPath: /api/health
+    autoDeployTrigger: checksPass
+    numInstances: 1
+    envVars:
+      - key: USE_LIVE_DATA
+        value: "1"
+      - key: LIVE_SYNC_ON_START
+        value: "1"
+      - key: SYNC_BACKGROUND
+        value: "1"
+      - key: SYNC_INTERVAL_HOURS
+        value: "24"
+      - key: DATABASE_PATH
+        value: /var/data/inspections.db
+      - key: DATASF_DATASET_ID
+        value: tvy3-wexg
+      - key: DATASF_BASE_URL
+        value: https://data.sfgov.org/resource
+      - key: SOCRATA_APP_TOKEN
+        sync: false
+    disk:
+      name: sf-food-check-data
+      mountPath: /var/data
+      sizeGB: 1

@@ -1,0 +1,2 @@
+permit_number,inspection_date,report_url,inspector_comments,corrective_action,comment_source,source_label
+93127,2026-01-01,https://inspections.myhealthdepartment.com/san-francisco/print/?pKey=REPLACE,PASTE VERBATIM OFFICIAL NARRATIVE HERE,PASTE OFFICIAL CORRECTIVE ACTION HERE,manual_official,Official SFDPH inspection report

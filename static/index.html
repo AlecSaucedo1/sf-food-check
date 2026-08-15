@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#f7f6f2" />
+  <meta name="description" content="Search San Francisco restaurant health inspection history, violations, and inspector comments." />
+  <title>SF Food Check</title>
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <button class="brand" data-route="home" aria-label="SF Food Check home"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span><strong>SF Food Check</strong><small>Official inspection data, made readable</small></span></button>
+    <button class="icon-button" id="aboutButton" aria-label="About this data">i</button>
+  </header>
+  <main id="app" aria-live="polite"></main>
+  <nav class="bottom-nav" aria-label="Primary navigation">
+    <button class="nav-item active" data-route="home"><span class="nav-icon">⌕</span><span>Search</span></button>
+    <button class="nav-item" data-route="nearby"><span class="nav-icon">◎</span><span>Nearby</span></button>
+    <button class="nav-item" data-route="recent"><span class="nav-icon">◷</span><span>Recent</span></button>
+    <button class="nav-item" data-route="about"><span class="nav-icon">i</span><span>About</span></button>
+  </nav>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
