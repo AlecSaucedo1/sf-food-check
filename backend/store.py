@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -89,8 +90,91 @@ def connect(db_path: str) -> sqlite3.Connection:
     return con
 
 
+def _blank(value: Any) -> bool:
+    return value in (None, "", [], {})
+
+
+def _status_rank(value: str) -> int:
+    return {"Unknown": 0, "Pass": 1, "Conditional Pass": 2, "Closure": 3}.get(value or "Unknown", 0)
+
+
+def _combine_text(a: Any, b: Any, separator: str = " | ") -> str:
+    left, right = str(a or "").strip(), str(b or "").strip()
+    if not left:
+        return right
+    if not right or right == left:
+        return left
+    pieces = [p.strip() for p in left.split(separator) if p.strip()]
+    if right not in pieces:
+        pieces.append(right)
+    return separator.join(pieces)
+
+
+def _merge_normalized_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse duplicate DataSF rows that represent one inspection.
+
+    DataSF can publish a summary row and one or more violation-bearing rows for the
+    same permit/date/type. We merge those rows before writing SQLite so an empty
+    summary row can never overwrite the actual findings.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    cutoff = date.today() + timedelta(days=1)
+
+    for raw in rows:
+        incoming = normalize_row(raw)
+        inspection_date = incoming.get("inspection_date")
+        if inspection_date:
+            try:
+                # The dataset describes completed inspections. Ignore obviously
+                # future-dated records (e.g. erroneous 2031 dates in a 2026 feed).
+                if date.fromisoformat(inspection_date) > cutoff:
+                    continue
+            except ValueError:
+                pass
+
+        key = incoming["inspection_id"]
+        if key not in merged:
+            merged[key] = incoming
+            continue
+
+        current = merged[key]
+        current["violation_count"] = max(int(current.get("violation_count") or 0), int(incoming.get("violation_count") or 0))
+        current["total_time_minutes"] = max(int(current.get("total_time_minutes") or 0), int(incoming.get("total_time_minutes") or 0)) or None
+        if _status_rank(incoming.get("facility_rating_status", "Unknown")) > _status_rank(current.get("facility_rating_status", "Unknown")):
+            current["facility_rating_status"] = incoming["facility_rating_status"]
+
+        combined_codes = list(current.get("violation_codes") or [])
+        for value in incoming.get("violation_codes") or []:
+            if value not in combined_codes:
+                combined_codes.append(value)
+        current["violation_codes"] = combined_codes
+        current["source_notes"] = _combine_text(current.get("source_notes"), incoming.get("source_notes"))
+
+        for field in (
+            "dba", "street_address", "city", "state", "zip", "analysis_neighborhood",
+            "supervisor_district", "inspection_frequency_type", "inspector", "permit_type",
+            "latitude", "longitude", "data_as_of", "raw_row_id",
+        ):
+            if _blank(current.get(field)) and not _blank(incoming.get(field)):
+                current[field] = incoming[field]
+
+        current_raw = current.get("raw") if isinstance(current.get("raw"), dict) else {}
+        incoming_raw = incoming.get("raw") if isinstance(incoming.get("raw"), dict) else {}
+        for field, value in incoming_raw.items():
+            if _blank(value):
+                continue
+            existing = current_raw.get(field)
+            if _blank(existing):
+                current_raw[field] = value
+            elif existing != value and ("violation" in str(field).lower() or "note" in str(field).lower()):
+                current_raw[field] = _combine_text(existing, value)
+        current["raw"] = current_raw
+
+    return list(merged.values())
+
+
 def upsert_inspections(con: sqlite3.Connection, rows: list[dict[str, Any]], *, commit: bool = True) -> int:
-    normalized = [normalize_row(r) for r in rows]
+    normalized = _merge_normalized_rows(rows)
     sql = """
     INSERT INTO inspections (
         inspection_id, permit_number, dba, street_address, city, state, zip,
@@ -200,12 +284,8 @@ def _row_to_inspection(row: sqlite3.Row, con: sqlite3.Connection) -> dict[str, A
         raw_source = json.loads(data.pop("raw_json") or "{}")
     except (TypeError, ValueError, json.JSONDecodeError):
         raw_source = {}
-    # The live DataSF dataset is inspection-grained. Recover violation details from
-    # the raw source row instead of assuming the separate `violations` table is filled.
     data["source_violations"] = extract_source_violations(raw_source, data["violation_codes"])
-    data["source_violation_fields"] = sorted(
-        str(k) for k in raw_source.keys() if "violation" in str(k).lower()
-    )
+    data["source_violation_fields"] = sorted(str(k) for k in raw_source.keys() if "violation" in str(k).lower())
 
     enrich = con.execute("SELECT report_url, inspector_comments, corrective_action, comment_source, source_label FROM report_enrichment WHERE permit_number=? AND inspection_date=?", (data["permit_number"], data["inspection_date"])).fetchone()
     data["report"] = dict(enrich) if enrich else None
