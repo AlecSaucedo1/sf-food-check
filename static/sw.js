@@ -1,1 +1,50 @@
-const CACHE='sf-food-check-v3',SHELL=['/','/static/styles.css','/static/app.js','/static/icon.svg'];self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL)))});self.addEventListener('activate',e=>e.waitUntil(Promise.all([self.clients.claim(),caches.keys().then(k=>Promise.all(k.filter(x=>x!==CACHE).map(x=>caches.delete(x))))])));self.addEventListener('fetch',e=>{if(e.request.method!=='GET')return;const u=new URL(e.request.url);if(u.pathname.startsWith('/api/')){e.respondWith(fetch(e.request));return}if(e.request.mode==='navigate'){e.respondWith(fetch(e.request).catch(()=>caches.match('/')));return}e.respondWith(caches.match(e.request).then(c=>c||fetch(e.request).then(r=>{const x=r.clone();caches.open(CACHE).then(k=>k.put(e.request,x));return r})))});
+const CACHE='sf-food-check-v5';
+const SHELL=['/','/static/styles.css?v=5','/static/risk.css?v=5','/static/app.js?v=5','/static/icon.svg'];
+
+self.addEventListener('install',event=>{
+  self.skipWaiting();
+  event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)));
+});
+
+self.addEventListener('activate',event=>{
+  event.waitUntil(Promise.all([
+    self.clients.claim(),
+    caches.keys().then(keys=>Promise.all(keys.filter(key=>key!==CACHE).map(key=>caches.delete(key))))
+  ]));
+});
+
+async function networkFirst(request){
+  try{
+    const response=await fetch(request);
+    if(response&&response.ok){
+      const copy=response.clone();
+      caches.open(CACHE).then(cache=>cache.put(request,copy));
+    }
+    return response;
+  }catch(error){
+    return (await caches.match(request)) || (request.mode==='navigate' ? caches.match('/') : Promise.reject(error));
+  }
+}
+
+self.addEventListener('fetch',event=>{
+  if(event.request.method!=='GET')return;
+  const url=new URL(event.request.url);
+  if(url.origin!==self.location.origin)return;
+  if(url.pathname.startsWith('/api/')){
+    event.respondWith(fetch(event.request));
+    return;
+  }
+  // HTML, JS and CSS are network-first so a new Render deployment cannot be
+  // hidden indefinitely behind an old PWA shell.
+  if(event.request.mode==='navigate'||event.request.destination==='script'||event.request.destination==='style'){
+    event.respondWith(networkFirst(event.request));
+    return;
+  }
+  event.respondWith(caches.match(event.request).then(cached=>cached||fetch(event.request).then(response=>{
+    if(response&&response.ok){
+      const copy=response.clone();
+      caches.open(CACHE).then(cache=>cache.put(event.request,copy));
+    }
+    return response;
+  })));
+});
