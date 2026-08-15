@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .datasf import fetch_all
-from .leaderboards import RISK_MODEL_VERSION, refresh_leaderboard_snapshot
+from .rankings_v2 import RISK_MODEL_VERSION, refresh_leaderboard_snapshot
 from .store import connect, replace_inspections, record_sync_run
 
 
