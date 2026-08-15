@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 
 import httpx
@@ -81,6 +82,12 @@ if __name__ == "__main__":
         raise RuntimeError(f"Known complete-coverage regression failed for Arsicault Bakery: {arsicault}")
     if not snapshot.exists():
         raise RuntimeError("Leaderboard snapshot was not generated with the complete database")
+
+    # Collapse WAL contents into the main file so the Docker layer contains one
+    # self-contained validated SQLite database and its checksum changes with data.
+    with sqlite3.connect(OUTPUT) as con:
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.commit()
 
     print(
         "Validated complete DataSF bundle: "
