@@ -98,15 +98,15 @@ def test_house_of_prime_rib_preventive_and_structural_findings_are_not_treated_a
         findings = latest["violations"]
 
         assert findings[0]["normalized_category"] == "Facility sanitation & pest prevention"
-        assert findings[0]["risk_score"] == 55
+        assert findings[0]["risk_score"] == 46
         assert findings[0]["risk_level"] == "Elevated"
 
         assert findings[1]["normalized_category"] == "Facility condition & repair"
-        assert findings[1]["risk_score"] == 35
+        assert findings[1]["risk_score"] == 27
         assert findings[1]["risk_level"] == "Moderate"
 
-        assert latest["risk"]["risk_score"] == 59
+        assert latest["risk"]["risk_score"] == 53
         assert latest["risk"]["risk_level"] == "Elevated"
-        assert latest["risk"]["risk_score"] < 75
+        assert latest["risk"]["risk_score"] < 70
     finally:
         con.close()
