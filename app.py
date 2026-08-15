@@ -24,8 +24,8 @@ from backend.observations import (
     observation_metrics,
 )
 from backend.scoring_v2 import assess_inspection, assess_violation
+from backend.shadow_sync import sync_complete_shadow
 from backend.store import connect, latest_sync_run, list_restaurants, nearby, restaurant_detail, seed_demo
-from backend.sync_service import sync_once
 
 ROOT = Path(__file__).resolve().parent
 ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
@@ -34,10 +34,11 @@ DB_PATH = os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)
 LEADERBOARD_SNAPSHOT_PATH = os.getenv("LEADERBOARD_SNAPSHOT_PATH", leaderboard_snapshot_path(DB_PATH))
 DEMO_PATH = ROOT / "data" / "demo.json"
 USE_LIVE_DATA = os.getenv("USE_LIVE_DATA", "1" if ON_RENDER else "0") == "1"
-SYNC_BACKGROUND = os.getenv("SYNC_BACKGROUND", "1" if ON_RENDER else "0") == "1"
+COMPLETE_SYNC_BACKGROUND = os.getenv("COMPLETE_SYNC_BACKGROUND", "1" if ON_RENDER else "0") == "1"
 SYNC_INTERVAL_HOURS = max(1.0, float(os.getenv("SYNC_INTERVAL_HOURS", "24")))
+SYNC_START_DELAY_SECONDS = max(0.0, float(os.getenv("SYNC_START_DELAY_SECONDS", "8")))
 LEADERBOARD_REFRESH_ON_START = os.getenv("LEADERBOARD_REFRESH_ON_START", "1" if ON_RENDER else "0") == "1"
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.8.1"
 
 
 def db():
@@ -151,13 +152,28 @@ def add_consumer_risk(result: dict) -> dict:
     return result
 
 
-async def periodic_sync() -> None:
+async def complete_history_sync_loop() -> None:
+    """Own the complete-history refresh inside the web process lifecycle.
+
+    The refresh builds a separate SQLite file and atomically switches DB_PATH only
+    after all DataSF eras have been fetched, normalized and stored successfully.
+    HTTP requests continue using the last good database throughout the refresh.
+    """
+    await asyncio.sleep(SYNC_START_DELAY_SECONDS)
     while True:
-        await asyncio.sleep(SYNC_INTERVAL_HOURS * 3600)
         try:
-            await sync_once(DB_PATH)
+            result = await sync_complete_shadow(DB_PATH)
+            print(
+                "Complete DataSF sync published: "
+                f"rows={result['rows']} facilities={result['facilities']} "
+                f"latest={result['latest_inspection_date']}",
+                flush=True,
+            )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            print(f"Background DataSF sync failed: {exc}", flush=True)
+            print(f"Complete DataSF sync failed; retaining last good database: {exc}", flush=True)
+        await asyncio.sleep(SYNC_INTERVAL_HOURS * 3600)
 
 
 async def refresh_rankings_after_start() -> None:
@@ -185,8 +201,8 @@ async def refresh_rankings_after_start() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     tasks: list[asyncio.Task] = []
-    if USE_LIVE_DATA and SYNC_BACKGROUND:
-        tasks.append(asyncio.create_task(periodic_sync()))
+    if USE_LIVE_DATA and COMPLETE_SYNC_BACKGROUND:
+        tasks.append(asyncio.create_task(complete_history_sync_loop()))
     if USE_LIVE_DATA and LEADERBOARD_REFRESH_ON_START:
         tasks.append(asyncio.create_task(refresh_rankings_after_start()))
     try:
@@ -244,6 +260,7 @@ def health():
         "facility_count": facilities,
         "latest_inspection_date": latest,
         "demo_mode": not USE_LIVE_DATA,
+        "complete_sync_background": COMPLETE_SYNC_BACKGROUND,
         "comment_records": comments,
         "comment_coverage_pct": round((inspections_with_comments / count) * 100, 1) if count else 0.0,
         "observation_records": observations["observation_records"],
@@ -270,7 +287,8 @@ def meta():
         "official_statuses": ["Pass", "Conditional Pass", "Closure"],
         "neighborhoods": neighborhoods,
         "data_source": "San Francisco Department of Public Health / DataSF",
-        "dataset_id": "tvy3-wexg",
+        "dataset_ids": ["pyih-qa8i", "5tti-66ds", "tvy3-wexg"],
+        "dataset_periods": ["2016-2019", "2020-2023", "2024-present"],
         "dataset_url": "https://data.sfgov.org/d/tvy3-wexg",
         "report_lookup_url": "https://inspections.myhealthdepartment.com/san-francisco",
         "comment_policy": "Inspector comments are displayed verbatim only when linked to an official report enrichment record.",
