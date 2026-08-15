@@ -16,11 +16,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Waiting for deployed API version 0.6.0..."
+          echo "Waiting for deployed API version 0.6.1..."
           health=''
           for attempt in $(seq 1 30); do
             health=$(curl -fsS --max-time 20 https://sf-food-check.onrender.com/api/health || true)
-            if echo "$health" | grep -q '"app_version":"0.6.0"'; then
+            if echo "$health" | grep -q '"app_version":"0.6.1"'; then
               break
             fi
             sleep 10
@@ -28,10 +28,13 @@ jobs:
 
           echo "--- LIVE HEALTH ---"
           echo "$health" | python -m json.tool || echo "$health"
-          echo "$health" | grep -q '"app_version":"0.6.0"'
+          echo "$health" | grep -q '"app_version":"0.6.1"'
 
           echo "--- LIVE LEADERBOARDS ---"
-          curl -fsS --max-time 90 'https://sf-food-check.onrender.com/api/leaderboards?limit=10&months=18' -o /tmp/leaders.json
+          start=$(date +%s)
+          curl -fsS --max-time 45 'https://sf-food-check.onrender.com/api/leaderboards?limit=10&months=18' -o /tmp/leaders.json
+          elapsed=$(($(date +%s)-start))
+          echo "leaderboard_request_seconds=$elapsed"
           python - <<'PY'
           import json
           d=json.load(open('/tmp/leaders.json'))
