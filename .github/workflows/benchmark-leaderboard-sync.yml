@@ -1,0 +1,47 @@
+name: Benchmark leaderboard sync
+
+on:
+  push:
+    branches: ["agent/inspect-live-18531"]
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fast-datasf-leaderboard-parser
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Full live DataSF sync benchmark
+        env:
+          DATABASE_PATH: /tmp/leaderboard-benchmark.db
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          python scripts/sync_datasf.py
+          elapsed=$(($(date +%s)-start))
+          echo "full_sync_seconds=$elapsed"
+          python - <<'PY'
+          import json, os, sqlite3
+          from backend.leaderboards import leaderboard_snapshot_path
+          db=os.environ['DATABASE_PATH']
+          con=sqlite3.connect(db)
+          print('inspection_rows=', con.execute('select count(*) from inspections').fetchone()[0])
+          print('facilities=', con.execute('select count(distinct permit_number) from inspections').fetchone()[0])
+          con.close()
+          path=leaderboard_snapshot_path(db)
+          payload=json.load(open(path))
+          print('snapshot_facilities=', payload['facility_count'])
+          print('snapshot_generated_at=', payload['generated_at'])
+          assert payload['facility_count'] > 1000
+          PY
