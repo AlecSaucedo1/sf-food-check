@@ -25,8 +25,6 @@ services:
         value: tvy3-wexg
       - key: DATASF_BASE_URL
         value: https://data.sfgov.org/resource
-      - key: SOCRATA_APP_TOKEN
-        sync: false
     disk:
       name: sf-food-check-data
       mountPath: /var/data
