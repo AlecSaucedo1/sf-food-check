@@ -8,7 +8,7 @@ from collections import Counter, defaultdict
 from datetime import date, timedelta
 from typing import Any
 
-from .taxonomy import assess_inspection, assess_violation, extract_source_violations
+from .taxonomy import assess_inspection, assess_violation, extract_source_violations, parse_grouped_findings
 
 _GENERIC_CHAIN_NAMES = {
     "BAR", "BAKERY", "CAFE", "COFFEE", "DELI", "GRILL", "KITCHEN", "MARKET", "RESTAURANT",
@@ -18,7 +18,6 @@ _CHAIN_ALIASES = {
     "STARBUCKS": ("STARBUCKS", "STARBUCKS"),
     "MCDONALDS": ("MCDONALDS", "MCDONALD'S"),
 }
-_STATUS_RANK = {"Unknown": 0, "Pass": 1, "Conditional Pass": 2, "Closure": 3}
 _CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 
 
@@ -27,12 +26,7 @@ def _clean_text(value: Any) -> str:
 
 
 def chain_identity(dba: str) -> tuple[str, str] | None:
-    """Return a conservative chain key and display name from a DataSF DBA.
-
-    We remove common store-number/location suffixes but otherwise keep the DBA intact.
-    A business only appears on the chain leaderboard after the aggregate also clears the
-    minimum distinct-address threshold.
-    """
+    """Return a conservative chain key and display name from a DataSF DBA."""
     label = unicodedata.normalize("NFKC", _clean_text(dba)).upper()
     if not label:
         return None
@@ -52,18 +46,29 @@ def chain_identity(dba: str) -> tuple[str, str] | None:
     return _CHAIN_ALIASES.get(key, (key, label))
 
 
-def _dedupe_assessed(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _dedupe_assessed(
+    items: list[dict[str, Any]],
+    assessment_cache: dict[tuple[str, str, str], dict[str, Any]],
+) -> list[dict[str, Any]]:
     assessed: list[dict[str, Any]] = []
     seen_codes: set[str] = set()
     seen_desc: set[str] = set()
     for item in items:
-        derived = assess_violation(
-            item.get("official_description") or item.get("code"),
-            official_description=item.get("official_description"),
-            code=item.get("code"),
-            official_risk_category=item.get("official_risk_category") or item.get("risk_level"),
-            source_field=item.get("source_field"),
-        )
+        raw_code = _clean_text(item.get("code"))
+        raw_desc = _clean_text(item.get("official_description"))
+        raw_risk = _clean_text(item.get("official_risk_category") or item.get("risk_level"))
+        cache_key = (raw_code, raw_desc, raw_risk)
+        derived = assessment_cache.get(cache_key)
+        if derived is None:
+            derived = assess_violation(
+                raw_desc or raw_code,
+                official_description=raw_desc or None,
+                code=raw_code or None,
+                official_risk_category=raw_risk or None,
+                source_field=item.get("source_field"),
+            )
+            assessment_cache[cache_key] = derived
+
         code = _clean_text(derived.get("code")).lower()
         desc = _clean_text(derived.get("official_description")).lower()
         if code and code in seen_codes:
@@ -78,16 +83,54 @@ def _dedupe_assessed(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return assessed
 
 
+def _fast_status_only_risk(status: str) -> tuple[int, str]:
+    if status == "Closure":
+        return 95, "Critical"
+    if status == "Conditional Pass":
+        return 80, "High"
+    return 0, "No cited risk"
+
+
+def _source_findings(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Use the known current DataSF violation shape before the generic parser.
+
+    This function is only called for inspections with cited violations. Most latest
+    inspections have no violations, so the leaderboard avoids JSON/regex work for
+    the large majority of facilities.
+    """
+    try:
+        raw = json.loads(data.get("raw_json") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raw = {}
+
+    raw_violation = raw.get("violation_codes") if isinstance(raw, dict) else None
+    if raw_violation:
+        grouped = parse_grouped_findings(raw_violation)
+        if grouped:
+            return [{**item, "source_field": "violation_codes"} for item in grouped]
+
+    try:
+        fallback_codes = json.loads(data.get("violation_codes_json") or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        fallback_codes = []
+    return extract_source_violations(raw, fallback_codes)
+
+
 def _latest_scored_facilities(con, months: int) -> list[dict[str, Any]]:
     cutoff = (date.today() - timedelta(days=round(months * 30.4375))).isoformat()
     rows = con.execute(
         """
         WITH ranked AS (
-          SELECT *, ROW_NUMBER() OVER (
-            PARTITION BY permit_number ORDER BY inspection_date DESC, inspection_id DESC
-          ) AS rn
+          SELECT
+            inspection_id, permit_number, dba, street_address, analysis_neighborhood,
+            inspection_date, facility_rating_status, violation_count,
+            violation_codes_json, raw_json,
+            ROW_NUMBER() OVER (
+              PARTITION BY permit_number ORDER BY inspection_date DESC, inspection_id DESC
+            ) AS rn
           FROM inspections
           WHERE inspection_date >= ?
+            AND facility_rating_status IN ('Pass', 'Conditional Pass', 'Closure')
         )
         SELECT * FROM ranked WHERE rn=1
         """,
@@ -95,48 +138,49 @@ def _latest_scored_facilities(con, months: int) -> list[dict[str, Any]]:
     ).fetchall()
 
     manual: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in con.execute(
-        "SELECT inspection_id, code, official_description, risk_level FROM violations"
-    ).fetchall():
-        manual[row["inspection_id"]].append({
-            "code": row["code"],
-            "official_description": row["official_description"],
-            "official_risk_category": row["risk_level"],
-            "source_field": "violations_table",
-        })
+    if con.execute("SELECT EXISTS(SELECT 1 FROM violations LIMIT 1)").fetchone()[0]:
+        for row in con.execute(
+            "SELECT inspection_id, code, official_description, risk_level FROM violations"
+        ).fetchall():
+            manual[row["inspection_id"]].append({
+                "code": row["code"],
+                "official_description": row["official_description"],
+                "official_risk_category": row["risk_level"],
+                "source_field": "violations_table",
+            })
 
     facilities: list[dict[str, Any]] = []
+    assessment_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in rows:
         data = dict(row)
-        status = data.get("facility_rating_status") or "Unknown"
-        if status not in {"Pass", "Conditional Pass", "Closure"}:
-            continue
-
-        try:
-            raw = json.loads(data.get("raw_json") or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            raw = {}
-        try:
-            fallback_codes = json.loads(data.get("violation_codes_json") or "[]")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            fallback_codes = []
-
-        candidates = list(manual.get(data["inspection_id"], []))
-        candidates.extend(extract_source_violations(raw, fallback_codes))
-        assessed = _dedupe_assessed(candidates)
+        status = data["facility_rating_status"]
         published_count = int(data.get("violation_count") or 0)
-        mapped_count = sum(1 for item in assessed if item.get("official_description"))
 
-        # A cited violation with no descriptive finding can look artificially safe.
-        # Exclude it from comparative rankings rather than guessing its severity.
-        if published_count > 0 and mapped_count == 0:
-            continue
+        # The common case: no cited violations. Avoid JSON parsing and taxonomy
+        # evaluation altogether while preserving the status floors used by the
+        # full inspection model.
+        if published_count == 0 and not manual.get(data["inspection_id"]):
+            score, level = _fast_status_only_risk(status)
+            mapped_count = 0
+        else:
+            candidates = list(manual.get(data["inspection_id"], []))
+            candidates.extend(_source_findings(data))
+            assessed = _dedupe_assessed(candidates, assessment_cache)
+            mapped_count = sum(1 for item in assessed if item.get("official_description"))
 
-        risk = assess_inspection(
-            assessed,
-            status=status,
-            violation_count=published_count or len(assessed),
-        )
+            # A cited violation with no descriptive finding can look artificially safe.
+            # Exclude it from comparative rankings rather than guessing its severity.
+            if published_count > 0 and mapped_count == 0:
+                continue
+
+            risk = assess_inspection(
+                assessed,
+                status=status,
+                violation_count=published_count or len(assessed),
+            )
+            score = int(risk.get("risk_score") or 0)
+            level = risk.get("risk_level") or "Low"
+
         facilities.append({
             "permit_number": data["permit_number"],
             "dba": data.get("dba") or "",
@@ -144,8 +188,8 @@ def _latest_scored_facilities(con, months: int) -> list[dict[str, Any]]:
             "analysis_neighborhood": data.get("analysis_neighborhood") or "",
             "inspection_date": data.get("inspection_date") or "",
             "facility_rating_status": status,
-            "risk_score": int(risk.get("risk_score") or 0),
-            "risk_level": risk.get("risk_level") or "Low",
+            "risk_score": score,
+            "risk_level": level,
             "mapped_count": mapped_count,
             "published_count": published_count,
         })
