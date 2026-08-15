@@ -1,0 +1,2 @@
+permit_number,inspection_date,inspection_type,violation_code,observation_text,corrective_action,report_url,source_label,sequence_number
+18531,2026-08-13,Routine,"114067(h), 114123","Paste the inspector's observation verbatim from the official report here.","Paste the related corrective action verbatim when present.",https://inspections.myhealthdepartment.com/san-francisco/print/?task=getPrintable&path=san-francisco&pKey=REPLACE_WITH_OFFICIAL_REPORT_KEY,Official SFDPH inspection report,1

@@ -11,6 +11,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.leaderboards import RISK_MODEL_VERSION, build_leaderboards, leaderboard_snapshot_path
+from backend.observations import (
+    OBSERVATION_MODEL_VERSION,
+    assess_observation,
+    attach_observations,
+    codes_match,
+    observation_metrics,
+)
 from backend.store import connect, latest_sync_run, list_restaurants, nearby, restaurant_detail, seed_demo
 from backend.sync_service import sync_once
 from backend.taxonomy import assess_inspection, assess_violation
@@ -24,7 +31,7 @@ DEMO_PATH = ROOT / "data" / "demo.json"
 USE_LIVE_DATA = os.getenv("USE_LIVE_DATA", "1" if ON_RENDER else "0") == "1"
 SYNC_BACKGROUND = os.getenv("SYNC_BACKGROUND", "1" if ON_RENDER else "0") == "1"
 SYNC_INTERVAL_HOURS = max(1.0, float(os.getenv("SYNC_INTERVAL_HOURS", "24")))
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.7.0"
 
 
 def db():
@@ -38,6 +45,46 @@ def _violation_key(item: dict) -> tuple[str, str]:
     code = str(item.get("code") or "").strip().lower()
     desc = " ".join(str(item.get("official_description") or "").lower().split())
     return code, desc
+
+
+def _attach_graded_observations(inspection: dict, assessed: list[dict]) -> None:
+    report_observations = inspection.pop("report_observations", []) or []
+    matched = 0
+    unmatched: list[dict] = []
+
+    for raw in report_observations:
+        observation_code = str(raw.get("violation_code") or "").strip()
+        match_index: int | None = None
+        if observation_code:
+            for index, violation in enumerate(assessed):
+                if codes_match(observation_code, violation.get("code")):
+                    match_index = index
+                    break
+        elif len(assessed) == 1:
+            match_index = 0
+
+        parent = assessed[match_index] if match_index is not None else {}
+        graded = {
+            **raw,
+            **assess_observation(
+                raw.get("observation_text"),
+                parent_score=parent.get("risk_score"),
+                parent_category=parent.get("normalized_category"),
+            ),
+        }
+        if match_index is not None:
+            assessed[match_index].setdefault("observations", []).append(graded)
+            matched += 1
+        else:
+            unmatched.append(graded)
+
+    inspection["unmatched_observations"] = unmatched
+    inspection["observation_mapping"] = {
+        "total_count": len(report_observations),
+        "matched_count": matched,
+        "unmatched_count": len(unmatched),
+        "model_version": OBSERVATION_MODEL_VERSION,
+    }
 
 
 def add_consumer_risk(result: dict) -> dict:
@@ -72,6 +119,8 @@ def add_consumer_risk(result: dict) -> dict:
                 desc_seen.add(desc)
             assessed.append(derived)
 
+        _attach_graded_observations(inspection, assessed)
+
         published_count = int(inspection.get("violation_count") or 0)
         display_count = len(assessed) if assessed else published_count
         inspection["violations"] = assessed
@@ -92,6 +141,7 @@ def add_consumer_risk(result: dict) -> dict:
         result["latest_risk"] = result["inspections"][0].get("risk")
     result["app_version"] = APP_VERSION
     result["risk_model_version"] = RISK_MODEL_VERSION
+    result["observation_model_version"] = OBSERVATION_MODEL_VERSION
     return result
 
 
@@ -152,8 +202,23 @@ def health():
               WHERE r.permit_number=i.permit_number AND r.inspection_date=i.inspection_date
                 AND COALESCE(r.inspector_comments,'') <> ''
             )""").fetchone()[0]
+        observations = observation_metrics(con)
         sync = latest_sync_run(con)
-    return {"ok": bool(count), "app_version": APP_VERSION, "risk_model_version": RISK_MODEL_VERSION, "inspection_rows": count, "facility_count": facilities, "latest_inspection_date": latest, "demo_mode": not USE_LIVE_DATA, "comment_records": comments, "comment_coverage_pct": round((inspections_with_comments / count) * 100, 1) if count else 0.0, "last_sync": sync}
+    return {
+        "ok": bool(count),
+        "app_version": APP_VERSION,
+        "risk_model_version": RISK_MODEL_VERSION,
+        "observation_model_version": OBSERVATION_MODEL_VERSION,
+        "inspection_rows": count,
+        "facility_count": facilities,
+        "latest_inspection_date": latest,
+        "demo_mode": not USE_LIVE_DATA,
+        "comment_records": comments,
+        "comment_coverage_pct": round((inspections_with_comments / count) * 100, 1) if count else 0.0,
+        "observation_records": observations["observation_records"],
+        "observation_coverage_pct": round((observations["inspections_with_observations"] / count) * 100, 1) if count else 0.0,
+        "last_sync": sync,
+    }
 
 
 @app.get("/api/ready")
@@ -178,8 +243,10 @@ def meta():
         "dataset_url": "https://data.sfgov.org/d/tvy3-wexg",
         "report_lookup_url": "https://inspections.myhealthdepartment.com/san-francisco",
         "comment_policy": "Inspector comments are displayed verbatim only when linked to an official report enrichment record.",
+        "observation_policy": "Inspector observations are displayed verbatim only from a verified official inspection report. SF Food Check separately grades the severity of the specific condition described; that severity is independent and not an official SFDPH score.",
         "risk_methodology": "Foodborne Illness Risk Index is an independent relative severity indicator based on how directly a published finding can contribute to contamination, pathogen growth, or pathogen survival. It is not a probability and not an official SFDPH score.",
         "risk_model_version": RISK_MODEL_VERSION,
+        "observation_model_version": OBSERVATION_MODEL_VERSION,
         "affiliation_disclaimer": "SF Food Check is an independent project and is not affiliated with or endorsed by the City and County of San Francisco.",
     }
 
@@ -211,6 +278,8 @@ def restaurants(q: str = "", status: str = "", neighborhood: str = "", limit: in
 def restaurant(permit_number: str):
     with db() as con:
         result = restaurant_detail(con, permit_number)
+        if result:
+            attach_observations(con, result)
     if not result:
         raise HTTPException(status_code=404, detail="Restaurant not found")
     return add_consumer_risk(result)
