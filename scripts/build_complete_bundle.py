@@ -69,12 +69,12 @@ if __name__ == "__main__":
     with connect(str(OUTPUT)) as con:
         total = con.execute("SELECT COUNT(*) FROM inspections").fetchone()[0]
         facilities = con.execute("SELECT COUNT(DISTINCT permit_number) FROM inspections").fetchone()[0]
-        legacy = con.execute("SELECT COUNT(*) FROM inspections WHERE permit_number LIKE 'H16-%'").fetchone()[0]
-        historical_2020 = con.execute("SELECT COUNT(*) FROM inspections WHERE permit_number LIKE 'H20-%'").fetchone()[0]
-        current = con.execute("SELECT COUNT(*) FROM inspections WHERE permit_number NOT LIKE 'H16-%' AND permit_number NOT LIKE 'H20-%'").fetchone()[0]
+        legacy = con.execute("SELECT COUNT(*) FROM inspections WHERE raw_json LIKE '%\"source_period\": \"2016-2019\"%'").fetchone()[0]
+        historical_2020 = con.execute("SELECT COUNT(*) FROM inspections WHERE raw_json LIKE '%\"source_period\": \"2020-2023\"%'").fetchone()[0]
+        current = total - legacy - historical_2020
         arsicault = list_restaurants(con, q="Arsicault", limit=200)
 
-    addresses = {" ".join(str(row.get("street_address") or "").upper().split()) for row in arsicault}
+    addresses = [" ".join(str(row.get("street_address") or "").upper().split()) for row in arsicault]
     if total < 20_000 or facilities < 5_000:
         raise RuntimeError(f"Complete DataSF bundle failed coverage sanity check: rows={total}, facilities={facilities}")
     if current == 0 or legacy == 0 or historical_2020 == 0:
@@ -82,8 +82,11 @@ if __name__ == "__main__":
             "Complete DataSF bundle is missing an inspection era: "
             f"current={current}, 2016-2019={legacy}, 2020-2023={historical_2020}"
         )
-    if len(arsicault) < 4 or not any("397 ARGUELLO" in address for address in addresses):
-        raise RuntimeError(f"Known complete-coverage regression failed for Arsicault Bakery: {arsicault}")
+    if len(arsicault) != 4 or sum("397 ARGUELLO" in address for address in addresses) != 1:
+        raise RuntimeError(
+            "Known complete-coverage/deduplication regression failed for Arsicault Bakery: "
+            f"{arsicault}"
+        )
     if not snapshot.exists():
         raise RuntimeError("Leaderboard snapshot was not generated with the complete database")
 
