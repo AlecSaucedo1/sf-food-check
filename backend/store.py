@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .normalize import normalize_row
+from .taxonomy import extract_source_violations
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -195,7 +196,17 @@ def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 def _row_to_inspection(row: sqlite3.Row, con: sqlite3.Connection) -> dict[str, Any]:
     data = dict(row)
     data["violation_codes"] = json.loads(data.pop("violation_codes_json") or "[]")
-    data.pop("raw_json", None)
+    try:
+        raw_source = json.loads(data.pop("raw_json") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raw_source = {}
+    # The live DataSF dataset is inspection-grained. Recover violation details from
+    # the raw source row instead of assuming the separate `violations` table is filled.
+    data["source_violations"] = extract_source_violations(raw_source, data["violation_codes"])
+    data["source_violation_fields"] = sorted(
+        str(k) for k in raw_source.keys() if "violation" in str(k).lower()
+    )
+
     enrich = con.execute("SELECT report_url, inspector_comments, corrective_action, comment_source, source_label FROM report_enrichment WHERE permit_number=? AND inspection_date=?", (data["permit_number"], data["inspection_date"])).fetchone()
     data["report"] = dict(enrich) if enrich else None
     violations = con.execute("SELECT code, official_description, normalized_category, consumer_description, risk_level, inspector_comment FROM violations WHERE inspection_id=?", (data["inspection_id"],)).fetchall()
