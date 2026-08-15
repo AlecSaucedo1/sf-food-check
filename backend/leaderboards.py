@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .taxonomy import assess_inspection, assess_violation, extract_source_violations, parse_grouped_findings
+from .taxonomy import assess_inspection, categorize, severity
 
 RISK_MODEL_VERSION = "2026.08.14.3"
 _GENERIC_CHAIN_NAMES = {
@@ -22,6 +22,15 @@ _CHAIN_ALIASES = {
     "STARBUCKS": ("STARBUCKS", "STARBUCKS"),
     "MCDONALDS": ("MCDONALDS", "MCDONALD'S"),
 }
+# Current DataSF `violation_codes` values are a sequence of California Retail Food
+# Code groups (11xxxx...) followed by ` - ` and the published description. The
+# general-purpose taxonomy parser intentionally supports many legacy schemas, but
+# it is too expensive for scoring thousands of facilities in one bulk refresh.
+# This bounded pattern only identifies finding starts; descriptions are sliced
+# linearly between those starts.
+_DATASF_FINDING_START_RE = re.compile(
+    r"(?:^|,\s+)(?P<codes>11\d{4}[0-9A-Za-z().,\s-]{0,260}?)\s+-\s+"
+)
 _CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 
 
@@ -54,10 +63,32 @@ def chain_identity(dba: str) -> tuple[str, str] | None:
     return _CHAIN_ALIASES.get(key, (key, label))
 
 
-def _dedupe_assessed(
+def parse_datasf_findings(value: Any) -> list[dict[str, Any]]:
+    """Parse the known 2024-present DataSF finding format in linear time."""
+    text = _clean_text(value)
+    if not text:
+        return []
+    matches = list(_DATASF_FINDING_START_RE.finditer(text))
+    findings: list[dict[str, Any]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        codes = _clean_text(match.group("codes")).strip(" ,")
+        description = _clean_text(text[match.end():end]).strip(" ,")
+        if codes and description:
+            findings.append({
+                "code": codes,
+                "official_description": description,
+                "official_risk_category": None,
+                "source_field": "violation_codes",
+            })
+    return findings
+
+
+def _bulk_assess(
     items: list[dict[str, Any]],
     assessment_cache: dict[tuple[str, str, str], dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Assess already-parsed findings without re-running the generic violation parser."""
     assessed: list[dict[str, Any]] = []
     seen_codes: set[str] = set()
     seen_desc: set[str] = set()
@@ -68,17 +99,18 @@ def _dedupe_assessed(
         cache_key = (raw_code, raw_desc, raw_risk)
         derived = assessment_cache.get(cache_key)
         if derived is None:
-            derived = assess_violation(
-                raw_desc or raw_code,
-                official_description=raw_desc or None,
-                code=raw_code or None,
-                official_risk_category=raw_risk or None,
-                source_field=item.get("source_field"),
-            )
+            derived = {
+                "code": raw_code,
+                "official_description": raw_desc or None,
+                "official_risk_category": raw_risk or None,
+                "source_field": item.get("source_field"),
+                **categorize(raw_desc),
+                **severity(raw_desc, raw_risk or None),
+            }
             assessment_cache[cache_key] = derived
 
-        code = _clean_text(derived.get("code")).lower()
-        desc = _clean_text(derived.get("official_description")).lower()
+        code = raw_code.lower()
+        desc = raw_desc.lower()
         if code and code in seen_codes:
             continue
         if not code and desc and desc in seen_desc:
@@ -103,19 +135,10 @@ def _source_findings(data: dict[str, Any]) -> list[dict[str, Any]]:
     try:
         raw = json.loads(data.get("raw_json") or "{}")
     except (TypeError, ValueError, json.JSONDecodeError):
-        raw = {}
-
-    raw_violation = raw.get("violation_codes") if isinstance(raw, dict) else None
-    if raw_violation:
-        grouped = parse_grouped_findings(raw_violation)
-        if grouped:
-            return [{**item, "source_field": "violation_codes"} for item in grouped]
-
-    try:
-        fallback_codes = json.loads(data.get("violation_codes_json") or "[]")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        fallback_codes = []
-    return extract_source_violations(raw, fallback_codes)
+        return []
+    if not isinstance(raw, dict):
+        return []
+    return parse_datasf_findings(raw.get("violation_codes"))
 
 
 def _latest_scored_facilities(con, months: int) -> list[dict[str, Any]]:
@@ -125,8 +148,7 @@ def _latest_scored_facilities(con, months: int) -> list[dict[str, Any]]:
         WITH ranked AS (
           SELECT
             inspection_id, permit_number, dba, street_address, analysis_neighborhood,
-            inspection_date, facility_rating_status, violation_count,
-            violation_codes_json, raw_json,
+            inspection_date, facility_rating_status, violation_count, raw_json,
             ROW_NUMBER() OVER (
               PARTITION BY permit_number ORDER BY inspection_date DESC, inspection_id DESC
             ) AS rn
@@ -164,7 +186,7 @@ def _latest_scored_facilities(con, months: int) -> list[dict[str, Any]]:
         else:
             candidates = list(manual.get(data["inspection_id"], []))
             candidates.extend(_source_findings(data))
-            assessed = _dedupe_assessed(candidates, assessment_cache)
+            assessed = _bulk_assess(candidates, assessment_cache)
             mapped_count = sum(1 for item in assessed if item.get("official_description"))
             if published_count > 0 and mapped_count == 0:
                 continue
@@ -192,16 +214,10 @@ def _latest_scored_facilities(con, months: int) -> list[dict[str, Any]]:
 
 
 def refresh_leaderboard_snapshot(db_path: str, *, model_version: str = RISK_MODEL_VERSION) -> dict[str, Any]:
-    """Precompute latest facility risk scores and atomically publish them to disk.
-
-    This deliberately runs during the DataSF sync rather than inside an HTTP request.
-    The previous snapshot remains intact until the replacement file is complete.
-    """
+    """Precompute latest facility risk scores and atomically publish them to disk."""
     from .store import connect
 
     with connect(db_path) as con:
-        # The current DataSF dataset starts in 2024. A 120-month window comfortably
-        # captures every possible latest rated inspection while keeping the helper generic.
         facilities = _latest_scored_facilities(con, 120)
 
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")

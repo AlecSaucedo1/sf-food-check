@@ -5,9 +5,26 @@ from backend.leaderboards import (
     build_leaderboards,
     chain_identity,
     leaderboard_snapshot_path,
+    parse_datasf_findings,
     refresh_leaderboard_snapshot,
 )
 from backend.store import connect, upsert_inspections
+
+
+HOUSE_OF_PRIME_RIB_VIOLATIONS = (
+    "114067(h), 114123, 114143(a, b), 114256-114256.2, 114256.4, "
+    "114257-114257.1, 114259, 114259.2-114259.3, 114279, 114281, 114282 - "
+    "Keep clean and free of litter or rubbish the premises of each food facility; "
+    "non-food items shall be stored and displayed separate from food and food-contact surfaces; "
+    "the facility shall be kept vermin proof; open-air barbecues shall be operated in an approved manner., "
+    "114143(d), 114266, 114268, 114268.1, 114271, 114272 - "
+    "Provide walls / ceilings using materials that are durable, smooth, nonabsorbent, light-colored, "
+    "and washable surfaces. All floor surfaces, other than the customer service areas, shall be approved, "
+    "smooth, durable, and made of nonabsorbent material that is easily cleanable. Approved base coving "
+    "shall be provided in all areas, except customer service areas and where food is stored in original "
+    "unopened containers. Food facilities shall be fully enclosed. All food facilities shall be kept clean "
+    "and in good repair."
+)
 
 
 def _row(permit, dba, address, neighborhood, *, violation_codes="", violation_count="0", status="Pass"):
@@ -30,6 +47,15 @@ def test_chain_identity_removes_store_numbers_without_collapsing_generic_names()
     assert chain_identity("STARBUCKS COFFEE #1234") == ("STARBUCKS", "STARBUCKS")
     assert chain_identity("MCDONALD'S 1042") == ("MCDONALDS", "MCDONALD'S")
     assert chain_identity("CAFE") is None
+
+
+def test_fast_datasf_parser_preserves_grouped_codes_and_descriptions():
+    findings = parse_datasf_findings(HOUSE_OF_PRIME_RIB_VIOLATIONS)
+    assert len(findings) == 2
+    assert findings[0]["code"].startswith("114067(h), 114123")
+    assert "vermin proof" in findings[0]["official_description"]
+    assert findings[1]["code"].startswith("114143(d), 114266")
+    assert "walls / ceilings" in findings[1]["official_description"]
 
 
 def _sample_rows():
@@ -80,8 +106,6 @@ def test_materialized_snapshot_serves_rankings_without_rescoring_request(tmp_pat
     assert Path(snapshot_path).exists()
 
     with connect(db_path) as con:
-        # Destroy the source inspection rows after materialization. The ranking should
-        # still load from the independent snapshot, proving the HTTP path need not rescore.
         con.execute("DELETE FROM inspections")
         con.commit()
         data = build_leaderboards(
