@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -33,45 +34,250 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", _text(value).lower())
+
+
+def _decode_collection(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return value
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError):
+        return value
+
+
+def _flatten(value: Any) -> list[str]:
+    value = _decode_collection(value)
+    if value in (None, ""):
+        return []
+    if isinstance(value, dict):
+        # Socrata may return structured objects. Prefer human-facing members.
+        ordered = []
+        for k in ("code", "violation_code", "id", "description", "violation_description", "name", "text", "value"):
+            if k in value and value[k] not in (None, ""):
+                ordered.extend(_flatten(value[k]))
+        if ordered:
+            return ordered
+        return [_text(v) for v in value.values() if _text(v)]
+    if isinstance(value, (list, tuple, set)):
+        out: list[str] = []
+        for item in value:
+            out.extend(_flatten(item))
+        return out
+    return [_text(value)] if _text(value) else []
+
+
+def _split_field(value: Any, *, comma: bool = False) -> list[str]:
+    values = _flatten(value)
+    out: list[str] = []
+    pattern = r"\s*(?:\r?\n|;|\|)\s*"
+    if comma:
+        pattern = r"\s*(?:\r?\n|;|\||,)\s*"
+    for value_text in values:
+        pieces = re.split(pattern, value_text)
+        out.extend(p.strip().strip("[]\"'") for p in pieces if p.strip().strip("[]\"'"))
+    return out
+
+
 def parse_violation(raw: str | None) -> tuple[str, str]:
-    value = _text(raw)
+    value = _text(raw).strip("[]\"'")
     if not value:
         return "", ""
-    m = re.match(r"^\s*(\d{2,6})\s*[:\-–—|]\s*(.+)$", value)
+    # Common source forms: 103103: description, 103103 - description,
+    # 103103 description, or a code without a description.
+    m = re.match(r"^\s*([A-Za-z]?\d{2,8}(?:\.\d+)?)\s*[:\-–—|]\s*(.+)$", value)
     if m:
         return m.group(1), m.group(2).strip()
-    m = re.match(r"^\s*(\d{5,6})\s+(.+)$", value)
+    m = re.match(r"^\s*([A-Za-z]?\d{4,8}(?:\.\d+)?)\s+(.+)$", value)
     if m:
         return m.group(1), m.group(2).strip()
-    if re.fullmatch(r"\d{2,6}", value):
+    if re.fullmatch(r"[A-Za-z]?\d{2,8}(?:\.\d+)?", value):
         return value, ""
     return "", value
 
 
+def extract_source_violations(raw_row: dict[str, Any] | None, fallback_codes: list[str] | None = None) -> list[dict[str, Any]]:
+    """Recover violation code/description pairs from a raw DataSF inspection row.
+
+    The current DataSF feed is inspection-grained, so violation information can be
+    stored in several columns or serialized collections. This routine intentionally
+    inspects all violation-named source fields instead of assuming one schema spelling.
+    """
+    raw_row = raw_row if isinstance(raw_row, dict) else {}
+    code_values: list[tuple[str, str]] = []
+    desc_values: list[tuple[str, str]] = []
+    generic_values: list[tuple[str, str, str | None]] = []
+    risk_values: list[str] = []
+
+    for field, value in raw_row.items():
+        nk = _key(field)
+        if "violation" not in nk:
+            continue
+        if "count" in nk or "numberof" in nk or nk.endswith("total"):
+            continue
+        if "risk" in nk or "severity" in nk or "category" in nk:
+            risk_values.extend(_split_field(value, comma=True))
+            continue
+
+        is_code = "code" in nk or nk.endswith("violationid") or nk.endswith("violationids")
+        is_desc = any(token in nk for token in ("description", "desc", "detail", "finding", "text", "name"))
+        if is_code and not is_desc:
+            code_values.extend((v, field) for v in _split_field(value, comma=True))
+        elif is_desc:
+            desc_values.extend((v, field) for v in _split_field(value, comma=False))
+        else:
+            # A generic `violations` field often contains complete "code: finding"
+            # strings. Keep these together so descriptions containing commas survive.
+            for v in _split_field(value, comma=False):
+                code, desc = parse_violation(v)
+                if code or desc:
+                    generic_values.append((v, field, None))
+
+    results: list[dict[str, Any]] = []
+
+    # Pair explicit code and description arrays positionally when available.
+    max_pairs = max(len(code_values), len(desc_values))
+    for idx in range(max_pairs):
+        raw_code = code_values[idx][0] if idx < len(code_values) else ""
+        source_field = code_values[idx][1] if idx < len(code_values) else (desc_values[idx][1] if idx < len(desc_values) else "")
+        parsed_code, code_desc = parse_violation(raw_code)
+        desc = desc_values[idx][0] if idx < len(desc_values) else code_desc
+        if desc:
+            d_code, d_desc = parse_violation(desc)
+            if not parsed_code and d_code:
+                parsed_code = d_code
+            desc = d_desc or desc
+        risk = risk_values[idx] if idx < len(risk_values) else (risk_values[0] if len(risk_values) == 1 else None)
+        if parsed_code or desc:
+            results.append({
+                "code": parsed_code or (raw_code if re.fullmatch(r"[A-Za-z]?\d{2,8}(?:\.\d+)?", raw_code) else ""),
+                "official_description": desc or None,
+                "official_risk_category": risk,
+                "source_field": source_field,
+            })
+
+    # Add complete entries from generic violation fields.
+    for raw_value, source_field, risk in generic_values:
+        code, desc = parse_violation(raw_value)
+        if code or desc:
+            results.append({
+                "code": code,
+                "official_description": desc or None,
+                "official_risk_category": risk,
+                "source_field": source_field,
+            })
+
+    # Finally include normalized fallback values that were not represented above.
+    for raw_value in fallback_codes or []:
+        code, desc = parse_violation(raw_value)
+        if code or desc:
+            results.append({
+                "code": code or (raw_value if re.fullmatch(r"[A-Za-z]?\d{2,8}(?:\.\d+)?", _text(raw_value)) else ""),
+                "official_description": desc or None,
+                "official_risk_category": None,
+                "source_field": "normalized_violation_codes",
+            })
+
+    # De-duplicate without losing a richer description for the same code.
+    deduped: list[dict[str, Any]] = []
+    by_code: dict[str, int] = {}
+    seen_desc: set[str] = set()
+    for item in results:
+        code = _text(item.get("code"))
+        desc = _text(item.get("official_description"))
+        desc_key = re.sub(r"\s+", " ", desc.lower())
+        if code and code in by_code:
+            existing = deduped[by_code[code]]
+            if not existing.get("official_description") and desc:
+                existing["official_description"] = desc
+                existing["source_field"] = item.get("source_field")
+            if not existing.get("official_risk_category") and item.get("official_risk_category"):
+                existing["official_risk_category"] = item.get("official_risk_category")
+            continue
+        if not code and desc_key and desc_key in seen_desc:
+            continue
+        if code:
+            by_code[code] = len(deduped)
+        if desc_key:
+            seen_desc.add(desc_key)
+        deduped.append(item)
+    return deduped
+
+
 def categorize(official_description: str | None) -> dict[str, str | None]:
     text = _text(official_description).lower()
+    if not text:
+        return {
+            "normalized_category": "Official violation code",
+            "consumer_description": "The public inspection row identifies a violation code but does not provide enough descriptive text to translate it reliably.",
+        }
     for words, category, consumer in CATEGORY_RULES:
         if any(w in text for w in words):
             return {"normalized_category": category, "consumer_description": consumer}
-    return {"normalized_category": "Other food-safety requirement", "consumer_description": "The inspection cited a food-safety requirement that does not map cleanly to a consumer category."}
+    return {
+        "normalized_category": "Other food-safety requirement",
+        "consumer_description": "The inspection cited a food-safety requirement that does not map cleanly to one of the main foodborne-illness categories.",
+    }
 
 
-def severity(official_description: str | None) -> dict[str, Any]:
+def severity(official_description: str | None, official_risk_category: str | None = None) -> dict[str, Any]:
     text = _text(official_description).lower()
     for score, level, words, rationale in SEVERITY_RULES:
         if any(w in text for w in words):
-            return {"risk_score": score, "risk_level": level, "risk_rationale": rationale, "risk_confidence": "high"}
-    if text:
-        return {"risk_score": 30, "risk_level": "Moderate", "risk_rationale": "The finding is relevant to food safety, but its direct connection to foodborne illness is not clear from the published description alone.", "risk_confidence": "medium"}
-    return {"risk_score": 25, "risk_level": "Limited detail", "risk_rationale": "The public record contains a violation code without enough descriptive text to estimate severity precisely.", "risk_confidence": "low"}
+            base = {"risk_score": score, "risk_level": level, "risk_rationale": rationale, "risk_confidence": "high"}
+            break
+    else:
+        if text:
+            base = {
+                "risk_score": 30,
+                "risk_level": "Moderate",
+                "risk_rationale": "The finding is relevant to food safety, but its direct connection to foodborne illness is not clear from the published description alone.",
+                "risk_confidence": "medium",
+            }
+        else:
+            base = {
+                "risk_score": 25,
+                "risk_level": "Limited detail",
+                "risk_rationale": "The public inspection row contains a violation code without enough descriptive text to estimate severity precisely.",
+                "risk_confidence": "low",
+            }
+
+    official = _text(official_risk_category).lower()
+    # When the source itself provides an official high/moderate/low risk category,
+    # use it only as a conservative floor; never downgrade a text-derived score.
+    if "high" in official and base["risk_score"] < 80:
+        base.update(risk_score=80, risk_level="High", risk_confidence="high", risk_rationale="The official source identifies this as a high-risk violation directly relevant to public health.")
+    elif "moderate" in official and base["risk_score"] < 50:
+        base.update(risk_score=50, risk_level="Elevated", risk_confidence="high", risk_rationale="The official source identifies this as a moderate-risk public-health violation.")
+    elif "low" in official and not text and base["risk_score"] > 20:
+        base.update(risk_score=15, risk_level="Low", risk_confidence="high", risk_rationale="The official source identifies this as a low-risk violation with limited immediate public-health risk.")
+    return base
 
 
-def assess_violation(raw: str | None, *, official_description: str | None = None, code: str | None = None) -> dict[str, Any]:
+def assess_violation(
+    raw: str | None,
+    *,
+    official_description: str | None = None,
+    code: str | None = None,
+    official_risk_category: str | None = None,
+    source_field: str | None = None,
+) -> dict[str, Any]:
     parsed_code, parsed_desc = parse_violation(raw)
     desc = _text(official_description) or parsed_desc
-    violation_code = _text(code) or parsed_code or (_text(raw) if re.fullmatch(r"\d{2,6}", _text(raw)) else "")
+    violation_code = _text(code) or parsed_code or (_text(raw) if re.fullmatch(r"[A-Za-z]?\d{2,8}(?:\.\d+)?", _text(raw)) else "")
     category = categorize(desc)
-    return {"code": violation_code, "official_description": desc or None, **category, **severity(desc)}
+    return {
+        "code": violation_code,
+        "official_description": desc or None,
+        "official_risk_category": _text(official_risk_category) or None,
+        "source_field": source_field,
+        **category,
+        **severity(desc, official_risk_category),
+    }
 
 
 def risk_band(score: int) -> str:
@@ -92,7 +298,8 @@ def assess_inspection(violations: list[dict[str, Any]], *, status: str = "", vio
     scores = sorted([int(v.get("risk_score") or 0) for v in violations if v.get("risk_score") is not None], reverse=True)
     if scores:
         score = min(100, round(scores[0] + sum(scores[1:]) * 0.12))
-        confidence = "high" if all(v.get("risk_confidence") == "high" for v in violations) else "medium"
+        confidences = {v.get("risk_confidence") for v in violations}
+        confidence = "high" if confidences == {"high"} else ("low" if confidences == {"low"} else "medium")
     elif violation_count:
         score = min(60, 25 + max(0, violation_count - 1) * 7)
         confidence = "low"
@@ -107,12 +314,21 @@ def assess_inspection(violations: list[dict[str, Any]], *, status: str = "", vio
         score = max(score, 80)
 
     ranked = sorted(violations, key=lambda v: int(v.get("risk_score") or 0), reverse=True)
+    descriptive = [v for v in ranked if v.get("official_description")]
     if not ranked:
         summary = "No violations were cited in the published inspection record." if score == 0 else "Violations were cited, but the public record does not include enough descriptive detail for a precise risk summary."
+    elif not descriptive:
+        summary = f"{len(ranked)} violation code{'s were' if len(ranked) != 1 else ' was'} published, but descriptive findings were not available in the inspection row."
     else:
-        primary = ranked[0]
+        primary = descriptive[0]
         summary = f"Primary concern: {primary.get('normalized_category', 'food-safety issue').lower()}."
         if len(ranked) > 1:
             summary += f" {len(ranked)-1} additional finding{'s' if len(ranked) != 2 else ''} also contributed to the inspection risk index."
 
-    return {"risk_score": score, "risk_level": risk_band(score), "risk_confidence": confidence, "risk_summary": summary, "methodology": "Relative foodborne-illness risk index; not a probability and not an official SFDPH score."}
+    return {
+        "risk_score": score,
+        "risk_level": risk_band(score),
+        "risk_confidence": confidence,
+        "risk_summary": summary,
+        "methodology": "Relative foodborne-illness risk index; not a probability and not an official SFDPH score.",
+    }
