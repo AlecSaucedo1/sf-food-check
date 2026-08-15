@@ -2,10 +2,19 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# Render sets these automatically. Keep the HTTP process read-only against a stable
-# SQLite target, while a low-priority background job builds the next complete data
-# version in a separate file and atomically switches a symlink when finished.
-if [[ -n "${RENDER:-}${RENDER_SERVICE_ID:-}${RENDER_EXTERNAL_URL:-}" ]]; then
+# Detect the persistent production data path from configuration we control. Render's
+# auto-injected environment variables are not guaranteed to be present in every
+# service configuration, while render.yaml explicitly sets DATABASE_PATH=/var/data/...
+# and USE_LIVE_DATA=1.
+PERSISTENT_LIVE=0
+if [[ "${DATABASE_PATH:-}" == /var/data/* ]] || [[ -n "${RENDER:-}${RENDER_SERVICE_ID:-}${RENDER_EXTERNAL_URL:-}" ]]; then
+  PERSISTENT_LIVE=1
+fi
+
+# Keep the HTTP process read-only against a stable SQLite target, while a low-priority
+# background job builds the next complete data version in a separate file and
+# atomically switches a symlink when finished.
+if [[ "$PERSISTENT_LIVE" == "1" ]]; then
   export USE_LIVE_DATA="${USE_LIVE_DATA:-1}"
 
   LEGACY_DATABASE_PATH="${DATABASE_PATH:-/var/data/inspections.db}"
@@ -43,6 +52,6 @@ else
 fi
 
 mkdir -p "$(dirname "$DATABASE_PATH")"
-echo "SF Food Check startup: live_data=${USE_LIVE_DATA} database=${DATABASE_PATH} shadow_sync=$([[ -n "${RENDER:-}${RENDER_SERVICE_ID:-}${RENDER_EXTERNAL_URL:-}" ]] && echo enabled || echo disabled)"
+echo "SF Food Check startup: live_data=${USE_LIVE_DATA} database=${DATABASE_PATH} shadow_sync=$([[ "$PERSISTENT_LIVE" == "1" ]] && echo enabled || echo disabled)"
 
 exec python -m uvicorn app:app --host 0.0.0.0 --port "${PORT:-8000}" --proxy-headers --forwarded-allow-ips='*'
