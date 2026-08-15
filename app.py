@@ -10,7 +10,12 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.leaderboards import RISK_MODEL_VERSION, build_leaderboards, leaderboard_snapshot_path
+from backend.rankings_v2 import (
+    RISK_MODEL_VERSION,
+    build_leaderboards,
+    leaderboard_snapshot_path,
+    refresh_leaderboard_snapshot,
+)
 from backend.observations import (
     OBSERVATION_MODEL_VERSION,
     assess_observation,
@@ -18,9 +23,9 @@ from backend.observations import (
     codes_match,
     observation_metrics,
 )
+from backend.scoring_v2 import assess_inspection, assess_violation
 from backend.store import connect, latest_sync_run, list_restaurants, nearby, restaurant_detail, seed_demo
 from backend.sync_service import sync_once
-from backend.taxonomy import assess_inspection, assess_violation
 
 ROOT = Path(__file__).resolve().parent
 ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
@@ -31,7 +36,8 @@ DEMO_PATH = ROOT / "data" / "demo.json"
 USE_LIVE_DATA = os.getenv("USE_LIVE_DATA", "1" if ON_RENDER else "0") == "1"
 SYNC_BACKGROUND = os.getenv("SYNC_BACKGROUND", "1" if ON_RENDER else "0") == "1"
 SYNC_INTERVAL_HOURS = max(1.0, float(os.getenv("SYNC_INTERVAL_HOURS", "24")))
-APP_VERSION = "0.7.0"
+LEADERBOARD_REFRESH_ON_START = os.getenv("LEADERBOARD_REFRESH_ON_START", "1" if ON_RENDER else "0") == "1"
+APP_VERSION = "0.8.0"
 
 
 def db():
@@ -154,16 +160,41 @@ async def periodic_sync() -> None:
             print(f"Background DataSF sync failed: {exc}", flush=True)
 
 
+async def refresh_rankings_after_start() -> None:
+    """Safely rebuild only the read-only leaderboard snapshot after web startup.
+
+    This never modifies the live SQLite inspection tables. Existing/stale snapshot
+    data remains usable during the rebuild and the new JSON snapshot is atomically
+    swapped into place when complete.
+    """
+    await asyncio.sleep(3)
+    try:
+        result = await asyncio.to_thread(
+            refresh_leaderboard_snapshot,
+            DB_PATH,
+            model_version=RISK_MODEL_VERSION,
+        )
+        print(
+            f"Leaderboard snapshot refreshed: facilities={result['facility_count']} model={RISK_MODEL_VERSION}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"Leaderboard snapshot refresh failed: {exc}", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    task = None
+    tasks: list[asyncio.Task] = []
     if USE_LIVE_DATA and SYNC_BACKGROUND:
-        task = asyncio.create_task(periodic_sync())
+        tasks.append(asyncio.create_task(periodic_sync()))
+    if USE_LIVE_DATA and LEADERBOARD_REFRESH_ON_START:
+        tasks.append(asyncio.create_task(refresh_rankings_after_start()))
     try:
         yield
     finally:
-        if task:
+        for task in tasks:
             task.cancel()
+        for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
@@ -244,7 +275,7 @@ def meta():
         "report_lookup_url": "https://inspections.myhealthdepartment.com/san-francisco",
         "comment_policy": "Inspector comments are displayed verbatim only when linked to an official report enrichment record.",
         "observation_policy": "Inspector observations are displayed verbatim only from a verified official inspection report. SF Food Check separately grades the severity of the specific condition described; that severity is independent and not an official SFDPH score.",
-        "risk_methodology": "Foodborne Illness Risk Index is an independent relative severity indicator based on how directly a published finding can contribute to contamination, pathogen growth, or pathogen survival. It is not a probability and not an official SFDPH score.",
+        "risk_methodology": "Foodborne Illness Risk Index is an independent relative severity indicator. The most serious published finding anchors the score and additional findings contribute with diminishing returns so the top of the scale is reserved for exceptional conditions. It is not a probability and not an official SFDPH score.",
         "risk_model_version": RISK_MODEL_VERSION,
         "observation_model_version": OBSERVATION_MODEL_VERSION,
         "affiliation_disclaimer": "SF Food Check is an independent project and is not affiliated with or endorsed by the City and County of San Francisco.",
