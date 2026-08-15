@@ -4,7 +4,11 @@ import hashlib
 import os
 import shutil
 import sqlite3
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 from backend.observations import ensure_observation_schema
 
@@ -17,8 +21,6 @@ LIVE_SNAPSHOT = Path(os.getenv("LEADERBOARD_SNAPSHOT_PATH", "/var/data/leaderboa
 
 
 def fingerprint(path: Path) -> str:
-    # The image build checkpoints the bundle before publication, so hashing the main
-    # file gives each validated data build a stable version identifier.
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
