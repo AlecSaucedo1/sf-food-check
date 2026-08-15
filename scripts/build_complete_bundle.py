@@ -10,7 +10,7 @@ from backend.store import connect, list_restaurants
 from backend.sync_service import sync_once_blocking
 
 
-OUTPUT = Path("/app/data/complete-inspections.db")
+OUTPUT = Path(os.getenv("BUNDLED_DATABASE_PATH", "/app/data/complete-inspections.db"))
 MAX_ROWS_PER_DATASET = 150_000
 DATASETS = ("tvy3-wexg", "5tti-66ds", "pyih-qa8i")
 BASE_URL = os.getenv("DATASF_BASE_URL", "https://data.sfgov.org/resource")
