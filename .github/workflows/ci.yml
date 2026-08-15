@@ -28,6 +28,7 @@ jobs:
       - name: JavaScript syntax
         run: |
           node --check static/app.js
+          node --check static/leaderboards-v2.js
           node --check static/observations.js
           node --check static/sw.js
       - name: Test
