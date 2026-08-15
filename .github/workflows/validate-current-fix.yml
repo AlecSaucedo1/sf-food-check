@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: agent/fix-live-violation-mapping
+          ref: agent/live-mapping-source-fix
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
