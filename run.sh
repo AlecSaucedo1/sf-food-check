@@ -11,9 +11,9 @@ if [[ "${DATABASE_PATH:-}" == /var/data/* ]] || [[ -n "${RENDER:-}${RENDER_SERVI
   PERSISTENT_LIVE=1
 fi
 
-# Keep the HTTP process read-only against a stable SQLite target, while a low-priority
-# background job builds the next complete data version in a separate file and
-# atomically switches a symlink when finished.
+# Keep HTTP reads pointed at a stable symlink. FastAPI owns the background complete-
+# history refresh; it builds a versioned shadow SQLite file and atomically switches
+# this symlink only after the full DataSF load succeeds.
 if [[ "$PERSISTENT_LIVE" == "1" ]]; then
   export USE_LIVE_DATA="${USE_LIVE_DATA:-1}"
 
@@ -35,23 +35,14 @@ if [[ "$PERSISTENT_LIVE" == "1" ]]; then
   export DATABASE_PATH="$ACTIVE_DATABASE_PATH"
   export LIVE_SYNC_ON_START="0"
   export SYNC_BACKGROUND="0"
-
-  # Do not block web startup. The refresher covers all official DataSF eras and
-  # repeats daily. `nice` prevents scoring/import work from taking CPU priority over
-  # user requests; the Python runner also uses a file lock to prevent overlap.
-  (
-    sleep 8
-    while true; do
-      nice -n 10 python scripts/sync_complete_shadow.py || echo "Complete DataSF shadow sync failed; retaining last good database" >&2
-      sleep 86400
-    done
-  ) &
+  export COMPLETE_SYNC_BACKGROUND="${COMPLETE_SYNC_BACKGROUND:-1}"
 else
   export USE_LIVE_DATA="${USE_LIVE_DATA:-0}"
   export DATABASE_PATH="${DATABASE_PATH:-./data/inspections.db}"
+  export COMPLETE_SYNC_BACKGROUND="${COMPLETE_SYNC_BACKGROUND:-0}"
 fi
 
 mkdir -p "$(dirname "$DATABASE_PATH")"
-echo "SF Food Check startup: live_data=${USE_LIVE_DATA} database=${DATABASE_PATH} shadow_sync=$([[ "$PERSISTENT_LIVE" == "1" ]] && echo enabled || echo disabled)"
+echo "SF Food Check startup: live_data=${USE_LIVE_DATA} database=${DATABASE_PATH} complete_sync=${COMPLETE_SYNC_BACKGROUND}"
 
 exec python -m uvicorn app:app --host 0.0.0.0 --port "${PORT:-8000}" --proxy-headers --forwarded-allow-ips='*'
