@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .datasf import fetch_all
+from .data_coverage import fetch_complete_history
 from .rankings_v2 import RISK_MODEL_VERSION, refresh_leaderboard_snapshot
 from .store import connect, replace_inspections, record_sync_run
 
@@ -19,9 +19,6 @@ def _store_rows_and_snapshot(db_path: str, rows: list[dict], started_at: str) ->
         facilities = con.execute("SELECT COUNT(DISTINCT permit_number) FROM inspections").fetchone()[0]
         latest = con.execute("SELECT MAX(inspection_date) FROM inspections").fetchone()[0]
 
-    # Score the latest rated inspection for each facility once during sync. This is
-    # intentionally outside the HTTP request path; the snapshot writer is atomic, so
-    # an existing leaderboard remains usable until the replacement is complete.
     leaderboard = refresh_leaderboard_snapshot(db_path, model_version=RISK_MODEL_VERSION)
 
     completed_at = utc_now()
@@ -52,18 +49,18 @@ async def sync_once(
     db_path: str,
     *,
     page_size: int = 5000,
-    max_rows: int = 100_000,
+    max_rows: int = 150_000,
     save_raw: str = "",
 ) -> dict:
-    """Fetch a complete DataSF snapshot and replace structured inspection rows.
+    """Fetch all official DataSF inspection eras and replace structured rows.
 
-    The existing database is left intact if the upstream fetch fails. Report enrichment
-    is stored separately and is not deleted during a structured-data refresh. Leaderboard
-    facility scores are materialized during the sync so leaderboard HTTP requests remain fast.
+    Production uses the shadow-database publisher in ``backend.shadow_sync`` so this
+    direct writer is primarily for local/admin workflows. Current, 2020-2023, and
+    2016-2019 records are included in the same normalized history.
     """
     started_at = utc_now()
     try:
-        rows = await fetch_all(page_size=page_size, max_rows=max_rows)
+        rows = await fetch_complete_history(page_size=page_size, max_rows=max_rows)
         if not rows:
             raise RuntimeError("DataSF returned no rows; existing database was preserved.")
 
@@ -72,9 +69,6 @@ async def sync_once(
             Path(save_raw).parent.mkdir(parents=True, exist_ok=True)
             Path(save_raw).write_text(json.dumps(rows, ensure_ascii=False, indent=2))
 
-        # Keep CPU-heavy normalization/scoring off the FastAPI event loop during the
-        # recurring background refresh. Startup sync still waits for completion before
-        # publishing the new application instance.
         return await asyncio.to_thread(_store_rows_and_snapshot, db_path, rows, started_at)
     except Exception as exc:
         try:
