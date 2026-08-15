@@ -28,7 +28,7 @@ def test_current_datasf_grouped_violation_format_parses_as_two_findings():
     assert "walls / ceilings" in items[1]["official_description"]
 
 
-def test_duplicate_summary_row_cannot_overwrite_violation_row():
+def _house_of_prime_rib_rows():
     violation_row = {
         "permit_number": "18531",
         "dba": "HOUSE OF PRIME RIB",
@@ -47,7 +47,11 @@ def test_duplicate_summary_row_cannot_overwrite_violation_row():
         "inspection_type": "Routine",
         "facility_rating_status": "Pass",
     }
+    return violation_row, summary_row
 
+
+def test_duplicate_summary_row_cannot_overwrite_violation_row():
+    violation_row, summary_row = _house_of_prime_rib_rows()
     con = connect(":memory:")
     try:
         count = upsert_inspections(con, [violation_row, summary_row])
@@ -72,15 +76,7 @@ def test_duplicate_summary_row_cannot_overwrite_violation_row():
 
 
 def test_duplicate_merge_also_works_when_summary_row_arrives_first():
-    summary_row = {
-        "permit_number": "18531",
-        "dba": "HOUSE OF PRIME RIB",
-        "street_address": "1906 VAN NESS AVE",
-        "inspection_date": "2026-08-13T00:00:00.000",
-        "inspection_type": "Routine",
-        "facility_rating_status": "Pass",
-    }
-    violation_row = {**summary_row, "violation_count": "2", "violation_codes": HOUSE_OF_PRIME_RIB_VIOLATIONS}
+    violation_row, summary_row = _house_of_prime_rib_rows()
     con = connect(":memory:")
     try:
         count = upsert_inspections(con, [summary_row, violation_row])
@@ -88,5 +84,29 @@ def test_duplicate_merge_also_works_when_summary_row_arrives_first():
         detail = add_consumer_risk(restaurant_detail(con, "18531"))
         assert detail["inspections"][0]["display_violation_count"] == 2
         assert len(detail["inspections"][0]["violations"]) == 2
+    finally:
+        con.close()
+
+
+def test_house_of_prime_rib_preventive_and_structural_findings_are_not_treated_as_direct_hazards():
+    violation_row, summary_row = _house_of_prime_rib_rows()
+    con = connect(":memory:")
+    try:
+        upsert_inspections(con, [violation_row, summary_row])
+        detail = add_consumer_risk(restaurant_detail(con, "18531"))
+        latest = detail["inspections"][0]
+        findings = latest["violations"]
+
+        assert findings[0]["normalized_category"] == "Facility sanitation & pest prevention"
+        assert findings[0]["risk_score"] == 55
+        assert findings[0]["risk_level"] == "Elevated"
+
+        assert findings[1]["normalized_category"] == "Facility condition & repair"
+        assert findings[1]["risk_score"] == 35
+        assert findings[1]["risk_level"] == "Moderate"
+
+        assert latest["risk"]["risk_score"] == 59
+        assert latest["risk"]["risk_level"] == "Elevated"
+        assert latest["risk"]["risk_score"] < 75
     finally:
         con.close()

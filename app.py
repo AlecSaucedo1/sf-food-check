@@ -22,8 +22,8 @@ DEMO_PATH = ROOT / "data" / "demo.json"
 USE_LIVE_DATA = os.getenv("USE_LIVE_DATA", "1" if ON_RENDER else "0") == "1"
 SYNC_BACKGROUND = os.getenv("SYNC_BACKGROUND", "1" if ON_RENDER else "0") == "1"
 SYNC_INTERVAL_HOURS = max(1.0, float(os.getenv("SYNC_INTERVAL_HOURS", "24")))
-APP_VERSION = "0.5.1"
-RISK_MODEL_VERSION = "2026.08.14.2"
+APP_VERSION = "0.5.2"
+RISK_MODEL_VERSION = "2026.08.14.3"
 
 
 def db():

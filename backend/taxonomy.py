@@ -6,25 +6,29 @@ from typing import Any
 
 CATEGORY_RULES = [
     (["ill employee", "sick employee", "employee illness", "vomit", "diarrhea"], "Employee illness", "A sick-food-worker control was not met, creating a direct contamination risk."),
-    (["bare hand", "bare-hand", "ready-to-eat", "cross contamination", "cross-contamination"], "Cross-contamination", "Food handling could transfer pathogens to ready-to-eat food."),
-    (["cook", "undercook", "reheat", "pasteur", "parasite destruction"], "Cooking & reheating", "Food did not fully meet a required pathogen-kill step such as cooking, reheating, or parasite destruction."),
+    (["bare hand", "bare-hand", "cross contamination", "cross-contamination"], "Cross-contamination", "Food handling could transfer pathogens to ready-to-eat food."),
+    (["undercook", "inadequate cooking", "improper cooking", "reheat", "pasteur", "parasite destruction"], "Cooking & reheating", "Food did not fully meet a required pathogen-kill step such as cooking, reheating, or parasite destruction."),
     (["cold hold", "hot hold", "temperature", "cooling", "refriger", "time as a public health control"], "Temperature control", "Food was not kept within time or temperature controls intended to prevent pathogen growth."),
     (["unsafe source", "unapproved source", "approved source", "shellstock", "shellfish tag", "adulterat"], "Food source & contamination", "Food source, traceability, or contamination controls did not meet safety requirements."),
     (["handwash", "hand wash", "hand washing", "soap", "paper towel"], "Hand washing", "A handwashing facility or required handwashing practice did not meet requirements."),
-    (["sanitize", "sanitiz", "food-contact", "food contact", "utensil"], "Food-contact sanitation", "A food-contact surface, utensil, or sanitizing process did not meet requirements."),
-    (["vermin", "rodent", "cockroach", "pest", "insect", "flies", "fly"], "Pests", "Inspectors observed pests or a condition that could allow pest contamination."),
     (["sewage", "wastewater", "potable water", "water supply"], "Water & sewage", "A water or sewage condition could directly affect food safety."),
-    (["thaw", "storage", "stored", "covered", "container", "protected from contamination"], "Food storage & protection", "Food storage or protection practices did not fully prevent contamination or unsafe handling."),
+    (["rodent", "cockroach", "evidence of vermin", "vermin infestation", "pest activity", "insect infestation", "flies", "fly infestation"], "Pests", "Inspectors observed pests or evidence of pest activity that could contaminate food or food-contact areas."),
+    (["vermin proof", "litter or rubbish", "open-air barbecue", "open-air barbecues", "premises of each food facility"], "Facility sanitation & pest prevention", "The facility did not fully meet housekeeping, separation, enclosure, or pest-prevention requirements."),
+    (["walls / ceilings", "wall surfaces", "floor surfaces", "base coving", "fully enclosed", "good repair"], "Facility condition & repair", "Floors, walls, ceilings, enclosure, or other facility surfaces did not fully meet cleanability or repair requirements."),
+    (["sanitize", "sanitiz", "unclean food-contact", "food-contact surface", "food contact surface", "utensil"], "Food-contact sanitation", "A food-contact surface, utensil, or sanitizing process did not meet requirements."),
+    (["thaw", "food storage", "protected from contamination", "covered food", "food container"], "Food storage & protection", "Food storage or protection practices did not fully prevent contamination or unsafe handling."),
     (["plumb", "sink", "drain"], "Plumbing & sinks", "A sink, drain, or plumbing requirement was not met."),
-    (["clean", "floor", "wall", "ceiling", "equipment", "repair", "maintain", "garbage", "refuse", "ventilation", "litter", "rubbish"], "Facility cleanliness & maintenance", "A cleaning, maintenance, refuse, ventilation, or facility-condition requirement was not met."),
+    (["clean", "equipment", "garbage", "refuse", "repair", "maintain", "floor", "wall", "ceiling", "ventilation", "litter", "rubbish"], "Facility cleanliness & maintenance", "A cleaning, maintenance, refuse, ventilation, or facility-condition requirement was not met."),
     (["certificate", "manager", "procedure", "haccp", "plan", "permit", "documentation", "label", "signage"], "Food-safety procedures", "A required food-safety procedure, credential, label, permit, or record was missing or incomplete."),
     (["employee", "personal", "glove", "hair"], "Employee practices", "An employee food-safety practice did not meet requirements."),
 ]
 
 SEVERITY_RULES = [
     (95, "Critical", ["ill employee", "sick employee", "employee illness", "vomit", "diarrhea", "sewage", "wastewater overflow", "unsafe source", "unapproved source", "adulterat", "cross contamination", "cross-contamination", "bare hand", "undercook", "inadequate cooking", "improper cooking", "inadequate reheating", "parasite destruction"], "Direct pathway for pathogens to contaminate food or survive a required kill step."),
-    (80, "High", ["cold hold", "hot hold", "temperature", "cooling", "refriger", "handwash", "hand wash", "hand washing", "sanitize", "sanitiz", "food-contact", "food contact", "vermin", "rodent", "cockroach", "pest", "shellstock", "shellfish tag", "potable water", "water supply"], "Strongly associated with contamination or pathogen growth when uncontrolled."),
-    (60, "Elevated", ["thaw", "protected from contamination", "food storage", "stored", "covered", "wiping cloth", "utensil", "glove", "plumb", "sink", "drain"], "Can meaningfully increase foodborne-illness risk, depending on the specific condition."),
+    (80, "High", ["cold hold", "hot hold", "temperature", "cooling", "refriger", "handwash", "hand wash", "hand washing", "sanitize", "sanitiz", "rodent", "cockroach", "evidence of vermin", "vermin infestation", "pest activity", "insect infestation", "flies", "shellstock", "shellfish tag", "potable water", "water supply"], "Strongly associated with contamination or pathogen growth when uncontrolled."),
+    (55, "Elevated", ["vermin proof", "litter or rubbish", "open-air barbecue", "open-air barbecues", "premises of each food facility", "non-food items shall be stored and displayed separate"], "A sanitation or pest-prevention control was deficient, creating an indirect but meaningful contamination pathway."),
+    (35, "Moderate", ["walls / ceilings", "wall surfaces", "floor surfaces", "base coving", "fully enclosed", "good repair"], "A structural or repair issue can make effective cleaning and pest exclusion more difficult, but is not itself evidence of food contamination."),
+    (60, "Elevated", ["thaw", "protected from contamination", "food storage", "covered food", "food container", "wiping cloth", "utensil", "glove", "plumb", "sink", "drain"], "Can meaningfully increase foodborne-illness risk, depending on the specific condition."),
     (35, "Moderate", ["clean", "equipment", "garbage", "refuse", "repair", "maintain", "floor", "wall", "ceiling", "ventilation", "employee practice", "litter", "rubbish"], "Primarily a sanitation or operational control issue with a less direct illness pathway."),
     (15, "Low", ["certificate", "manager", "permit", "documentation", "label", "signage", "hair", "lighting", "procedure", "plan"], "Mostly administrative, documentation, or lower-immediacy food-safety concern."),
 ]
@@ -202,9 +206,6 @@ def extract_source_violations(raw_row: dict[str, Any] | None, fallback_codes: li
                 "source_field": source_field,
             })
 
-    # `fallback_codes` comes from the legacy normalized column and may already
-    # have been comma-split. Use it only when the raw DataSF row yielded no
-    # violation findings at all; otherwise it would duplicate/corrupt grouped codes.
     if not results:
         for raw_value in fallback_codes or []:
             grouped = parse_grouped_findings(raw_value)
