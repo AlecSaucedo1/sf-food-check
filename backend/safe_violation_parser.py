@@ -8,15 +8,12 @@ from typing import Any
 #
 # Restaurant detail records can contain long violation strings. The legacy parser
 # used a whole-string regex with nested repetition and look-ahead, which could spend
-# many seconds backtracking on certain payloads. This implementation first finds the
-# literal ` - ` separators, then applies a code-group regex only to a fixed-size
-# window immediately before each separator. Runtime is therefore bounded by input
-# length and a constant-size validation window.
-_CODE_RE = r"[A-Za-z]?\d{2,}[\d.\-]*(?:\([^)]{0,80}\))?"
-_CODE_GROUP_SUFFIX_RE = re.compile(
-    rf"(?:^|,\s*)(?P<codes>{_CODE_RE}(?:,\s*{_CODE_RE}){{0,40}})\s*$"
-)
+# many seconds backtracking on certain payloads. This implementation finds literal
+# ` - ` separators, then walks backward through top-level comma-separated code tokens.
+# It never regex-searches narrative text.
+_CODE_TOKEN_RE = re.compile(r"[A-Za-z]?\d{2,}[\d.\-]*(?:\([^)]{0,80}\))?")
 _MAX_CODE_WINDOW = 1200
+_MAX_CODES_PER_FINDING = 40
 
 
 def _text(value: Any) -> str:
@@ -64,6 +61,45 @@ def _flatten(value: Any) -> list[str]:
     return [_text(value)] if _text(value) else []
 
 
+def _top_level_parts(text: str) -> list[tuple[int, int, str]]:
+    """Split on commas outside parentheses while retaining source offsets."""
+    parts: list[tuple[int, int, str]] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")" and depth:
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append((start, index, text[start:index]))
+            start = index + 1
+    parts.append((start, len(text), text[start:]))
+    return parts
+
+
+def _code_group_suffix(prefix: str) -> tuple[int, str] | None:
+    """Return the trailing code-group start and normalized text, if present."""
+    parts = _top_level_parts(prefix)
+    codes: list[str] = []
+    code_start: int | None = None
+
+    for start, _end, raw_part in reversed(parts):
+        token = raw_part.strip()
+        if not token or not _CODE_TOKEN_RE.fullmatch(token):
+            break
+        leading = len(raw_part) - len(raw_part.lstrip())
+        code_start = start + leading
+        codes.append(token)
+        if len(codes) >= _MAX_CODES_PER_FINDING:
+            break
+
+    if code_start is None:
+        return None
+    codes.reverse()
+    return code_start, ", ".join(codes)
+
+
 def _finding_starts(text: str) -> list[tuple[int, int, str]]:
     starts: list[tuple[int, int, str]] = []
     search_from = 0
@@ -74,19 +110,17 @@ def _finding_starts(text: str) -> list[tuple[int, int, str]]:
 
         window_start = max(0, separator - _MAX_CODE_WINDOW)
         prefix = text[window_start:separator]
-        match = _CODE_GROUP_SUFFIX_RE.search(prefix)
-        if match:
-            code_start = window_start + match.start("codes")
-            description_start = separator + 3
-            codes = re.sub(r"\s+", " ", match.group("codes").strip().strip(" ,"))
-            starts.append((code_start, description_start, codes))
+        suffix = _code_group_suffix(prefix)
+        if suffix:
+            local_code_start, codes = suffix
+            starts.append((window_start + local_code_start, separator + 3, codes))
 
         search_from = separator + 3
     return starts
 
 
 def parse_grouped_findings(value: Any) -> list[dict[str, str]]:
-    """Parse grouped code-list + description findings without whole-string regex scans."""
+    """Parse grouped code-list + description findings in linear time."""
     results: list[dict[str, str]] = []
     for raw in _flatten(value):
         # Pipe-separated values are uncommon but supported by the legacy parser.
