@@ -4,17 +4,19 @@ import json
 import re
 from typing import Any
 
-# Bounded parser for grouped DataSF findings.
+# Safe parser for grouped DataSF findings.
 #
-# The previous parser used nested repetition plus a variable-length look-ahead over
-# the entire description. Certain long violation strings could therefore consume a
-# web worker for many seconds and cause Render's proxy to return 502/504 errors.
-# This expression only locates the beginning of each finding. Descriptions are then
-# sliced between starts, keeping runtime effectively linear in the input length.
+# Restaurant detail records can contain long violation strings. The legacy parser
+# used a whole-string regex with nested repetition and look-ahead, which could spend
+# many seconds backtracking on certain payloads. This implementation first finds the
+# literal ` - ` separators, then applies a code-group regex only to a fixed-size
+# window immediately before each separator. Runtime is therefore bounded by input
+# length and a constant-size validation window.
 _CODE_RE = r"[A-Za-z]?\d{2,}[\d.\-]*(?:\([^)]{0,80}\))?"
-_FINDING_START_RE = re.compile(
-    rf"(?:^|,\s*)(?P<codes>{_CODE_RE}(?:,\s*{_CODE_RE}){{0,40}})\s+-\s+"
+_CODE_GROUP_SUFFIX_RE = re.compile(
+    rf"(?:^|,\s*)(?P<codes>{_CODE_RE}(?:,\s*{_CODE_RE}){{0,40}})\s*$"
 )
+_MAX_CODE_WINDOW = 1200
 
 
 def _text(value: Any) -> str:
@@ -62,19 +64,40 @@ def _flatten(value: Any) -> list[str]:
     return [_text(value)] if _text(value) else []
 
 
+def _finding_starts(text: str) -> list[tuple[int, int, str]]:
+    starts: list[tuple[int, int, str]] = []
+    search_from = 0
+    while True:
+        separator = text.find(" - ", search_from)
+        if separator < 0:
+            break
+
+        window_start = max(0, separator - _MAX_CODE_WINDOW)
+        prefix = text[window_start:separator]
+        match = _CODE_GROUP_SUFFIX_RE.search(prefix)
+        if match:
+            code_start = window_start + match.start("codes")
+            description_start = separator + 3
+            codes = re.sub(r"\s+", " ", match.group("codes").strip().strip(" ,"))
+            starts.append((code_start, description_start, codes))
+
+        search_from = separator + 3
+    return starts
+
+
 def parse_grouped_findings(value: Any) -> list[dict[str, str]]:
-    """Parse grouped code-list + description findings in bounded linear time."""
+    """Parse grouped code-list + description findings without whole-string regex scans."""
     results: list[dict[str, str]] = []
     for raw in _flatten(value):
-        for segment in re.split(r"\s*\|\s*", raw):
+        # Pipe-separated values are uncommon but supported by the legacy parser.
+        for segment in raw.split("|"):
             text = segment.strip()
             if not text:
                 continue
-            matches = list(_FINDING_START_RE.finditer(text))
-            for index, match in enumerate(matches):
-                end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-                codes = re.sub(r"\s+", " ", match.group("codes").strip().strip(" ,"))
-                desc = re.sub(r"\s+", " ", text[match.end():end].strip().strip(" ,"))
+            starts = _finding_starts(text)
+            for index, (code_start, description_start, codes) in enumerate(starts):
+                description_end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
+                desc = re.sub(r"\s+", " ", text[description_start:description_end].strip().strip(" ,"))
                 if codes and desc:
                     results.append({"code": codes, "official_description": desc})
     return results
