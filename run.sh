@@ -2,14 +2,25 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-export DATABASE_PATH="${DATABASE_PATH:-./data/inspections.db}"
-mkdir -p "$(dirname "$DATABASE_PATH")"
+# Render sets RENDER/RENDER_SERVICE_ID automatically. Default a Render deployment to
+# live DataSF mode even if the service was created manually rather than by Blueprint.
+if [[ -n "${RENDER:-}${RENDER_SERVICE_ID:-}${RENDER_EXTERNAL_URL:-}" ]]; then
+  export USE_LIVE_DATA="${USE_LIVE_DATA:-1}"
+  export LIVE_SYNC_ON_START="${LIVE_SYNC_ON_START:-1}"
+  export SYNC_BACKGROUND="${SYNC_BACKGROUND:-1}"
+  export SYNC_INTERVAL_HOURS="${SYNC_INTERVAL_HOURS:-24}"
+  export DATABASE_PATH="${DATABASE_PATH:-/var/data/inspections.db}"
+else
+  export USE_LIVE_DATA="${USE_LIVE_DATA:-0}"
+  export DATABASE_PATH="${DATABASE_PATH:-./data/inspections.db}"
+fi
 
-if [[ "${USE_LIVE_DATA:-0}" == "1" && "${LIVE_SYNC_ON_START:-1}" == "1" ]]; then
-  echo "Refreshing San Francisco inspection data before startup..."
+mkdir -p "$(dirname "$DATABASE_PATH")"
+echo "SF Food Check startup: live_data=${USE_LIVE_DATA} database=${DATABASE_PATH}"
+
+if [[ "${USE_LIVE_DATA}" == "1" && "${LIVE_SYNC_ON_START:-1}" == "1" ]]; then
+  echo "Refreshing San Francisco inspection data before startup (Socrata token optional)..."
   if ! python scripts/sync_datasf.py; then
-    # Fail closed on a brand-new production deployment; serve stale data only if a prior
-    # successful live database already exists.
     if python - "$DATABASE_PATH" <<'PY'
 import sqlite3, sys
 path = sys.argv[1]
