@@ -1,0 +1,66 @@
+name: Live inspect permit 18531
+
+on:
+  push:
+    branches: ["agent/inspect-live-18531"]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect deployed API and DataSF source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Waiting for deployed API version 0.5.0..."
+          health=''
+          for attempt in $(seq 1 18); do
+            health=$(curl -fsS --max-time 20 https://sf-food-check.onrender.com/api/health || true)
+            if echo "$health" | grep -q '"app_version":"0.5.0"'; then
+              break
+            fi
+            sleep 10
+          done
+
+          echo "--- LIVE HEALTH ---"
+          echo "$health" | python -m json.tool || echo "$health"
+
+          echo "--- LIVE PERMIT 18531 ---"
+          curl -fsS --max-time 30 https://sf-food-check.onrender.com/api/restaurants/18531 -o /tmp/live.json
+          python - <<'PY'
+          import json
+          d=json.load(open('/tmp/live.json'))
+          print('app_version=', d.get('app_version'))
+          print('risk_model_version=', d.get('risk_model_version'))
+          print('restaurant=', d.get('dba'), d.get('street_address'))
+          print('latest_risk=', d.get('latest_risk'))
+          for i, ins in enumerate(d.get('inspections', [])[:5]):
+              print('\ninspection', i, ins.get('inspection_date'), ins.get('facility_rating_status'))
+              print('published_count=', ins.get('violation_count'), 'display_count=', ins.get('display_violation_count'))
+              print('mapping=', ins.get('mapping'))
+              for v in ins.get('violations', []):
+                  print(' violation=', {k:v.get(k) for k in ('code','official_description','official_risk_category','normalized_category','risk_score','risk_level','risk_confidence','source_field')})
+          PY
+
+          echo "--- DATASF RAW PERMIT 18531 ---"
+          curl -fsS --max-time 30 --get 'https://data.sfgov.org/resource/tvy3-wexg.json' \
+            --data-urlencode "\$where=permit_number='18531'" \
+            --data-urlencode "\$limit=20" \
+            --data-urlencode "\$order=inspection_date DESC" \
+            -o /tmp/datasf.json
+          python - <<'PY'
+          import json
+          rows=json.load(open('/tmp/datasf.json'))
+          print('rows=', len(rows))
+          if rows:
+              print('all_keys=', sorted(rows[0].keys()))
+          for i,row in enumerate(rows[:5]):
+              print('\nraw inspection', i, row.get('inspection_date'), row.get('facility_rating_status'))
+              for k,v in row.items():
+                  if 'violation' in k.lower() or 'risk' in k.lower() or 'note' in k.lower():
+                      print(f' {k}={v!r}')
+          PY
