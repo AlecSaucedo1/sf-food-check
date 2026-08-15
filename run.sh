@@ -18,26 +18,19 @@ fi
 mkdir -p "$(dirname "$DATABASE_PATH")"
 echo "SF Food Check startup: live_data=${USE_LIVE_DATA} database=${DATABASE_PATH}"
 
+# Do not make web startup depend on a full DataSF refresh. Render's persistent disk
+# retains the last good snapshot, and sync_service replaces inspection data plus the
+# leaderboard snapshot atomically. The refresh can therefore run after uvicorn starts
+# without exposing a partially written dataset.
 if [[ "${USE_LIVE_DATA}" == "1" && "${LIVE_SYNC_ON_START:-1}" == "1" ]]; then
-  echo "Refreshing San Francisco inspection data before startup (Socrata token optional)..."
-  if ! python scripts/sync_datasf.py; then
-    if python - "$DATABASE_PATH" <<'PY'
-import sqlite3, sys
-path = sys.argv[1]
-try:
-    con = sqlite3.connect(path)
-    count = con.execute("SELECT COUNT(*) FROM inspections").fetchone()[0]
-except Exception:
-    count = 0
-raise SystemExit(0 if count > 0 else 1)
-PY
-    then
-      echo "WARNING: live refresh failed; starting with the previously stored inspection dataset."
+  echo "Starting San Francisco inspection refresh in the background (Socrata token optional)..."
+  (
+    if python scripts/sync_datasf.py; then
+      echo "Initial DataSF refresh completed."
     else
-      echo "ERROR: live refresh failed and no prior live dataset exists. Refusing to publish demo/empty data."
-      exit 1
+      echo "WARNING: initial DataSF refresh failed; continuing with the last persisted dataset if available."
     fi
-  fi
+  ) &
 fi
 
 exec python -m uvicorn app:app --host 0.0.0.0 --port "${PORT:-8000}" --proxy-headers --forwarded-allow-ips='*'
