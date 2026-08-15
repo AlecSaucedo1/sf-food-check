@@ -17,6 +17,8 @@ LIVE_SNAPSHOT = Path(os.getenv("LEADERBOARD_SNAPSHOT_PATH", "/var/data/leaderboa
 
 
 def fingerprint(path: Path) -> str:
+    # The image build checkpoints the bundle before publication, so hashing the main
+    # file gives each validated data build a stable version identifier.
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -76,10 +78,28 @@ def preserve_enrichment(new_db: Path, old_db: Path | None) -> None:
             con.execute("DETACH DATABASE previous")
 
 
-def atomic_copy(source: Path, destination: Path) -> None:
+def atomic_copy_file(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp = destination.with_name(destination.name + ".tmp")
     shutil.copy2(source, temp)
+    os.replace(temp, destination)
+
+
+def atomic_copy_database(source: Path, destination: Path) -> None:
+    """Create a consistent standalone SQLite copy, including any WAL pages."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp = destination.with_name(destination.name + ".tmp")
+    for candidate in (temp, Path(str(temp) + "-wal"), Path(str(temp) + "-shm")):
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
+
+    source_uri = f"file:{source.resolve()}?mode=ro"
+    with sqlite3.connect(source_uri, uri=True) as src, sqlite3.connect(temp) as dst:
+        src.backup(dst)
+        dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        dst.commit()
     os.replace(temp, destination)
 
 
@@ -124,7 +144,7 @@ def main() -> None:
     previous = existing_database()
 
     if not target.exists():
-        atomic_copy(BUNDLE_DB, target)
+        atomic_copy_database(BUNDLE_DB, target)
         preserve_enrichment(target, previous)
         with sqlite3.connect(target) as con:
             ensure_observation_schema(con)
@@ -132,7 +152,7 @@ def main() -> None:
             con.commit()
 
     publish_symlink(target)
-    atomic_copy(BUNDLE_SNAPSHOT, LIVE_SNAPSHOT)
+    atomic_copy_file(BUNDLE_SNAPSHOT, LIVE_SNAPSHOT)
     prune_versions(target)
 
     with sqlite3.connect(target) as con:
