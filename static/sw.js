@@ -1,5 +1,5 @@
-const CACHE='sf-food-check-v9';
-const SHELL=['/','/static/styles.css?v=9','/static/risk.css?v=9','/static/observations.css?v=9','/static/app.js?v=9','/static/leaderboards-v2.js?v=9','/static/observations.js?v=9','/static/icon.svg'];
+const CACHE='sf-food-check-v10';
+const SHELL=['/','/static/styles.css?v=10','/static/risk.css?v=10','/static/observations.css?v=10','/static/app.js?v=10','/static/leaderboards-v2.js?v=10','/static/observations.js?v=10','/static/icon.svg'];
 
 self.addEventListener('install',event=>{
   self.skipWaiting();

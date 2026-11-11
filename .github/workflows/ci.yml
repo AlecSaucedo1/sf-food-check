@@ -32,5 +32,6 @@ jobs:
           node --check static/leaderboards-v2.js
           node --check static/observations.js
           node --check static/sw.js
+          node tests/date-format.test.cjs
       - name: Test
         run: pytest -q
