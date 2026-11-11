@@ -35,8 +35,8 @@ The UI clearly distinguishes an unlinked narrative, demo narrative, and official
 ## Next production upgrades
 
 1. PostgreSQL + PostGIS instead of SQLite.
-2. Scheduled ingestion job (monthly source sync plus daily health check for source changes).
-3. Server-side full-text/trigram search and geospatial queries.
+2. Monitor the scheduled daily GitHub Actions DataSF revision check and CI-gated deployment for failures. The build itself performs the complete three-era import.
+3. Add full-text/trigram search if substring search across the materialized facility index becomes a bottleneck; bounding-box geographic search is already implemented.
 4. Stable official-report enrichment adapter after SFDPH/MyHealthDepartment access method is confirmed.
 5. Violation-code dictionary sourced from official SF documentation, then taxonomy versioning.
 6. Observability: source-row counts, freshness, failed joins, duplicate permits, changed field detection.

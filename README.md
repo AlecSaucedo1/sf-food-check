@@ -18,7 +18,7 @@ SF Food Check is an independent project and is not affiliated with or endorsed b
 - Installable PWA shell
 - FastAPI backend
 - SQLite persistence for the single-instance beta
-- DataSF live ingestion for dataset `tvy3-wexg`
+- Complete three-era DataSF import (`pyih-qa8i`, `5tti-66ds`, `tvy3-wexg`)
 - Raw-source retention for auditability
 - Health/readiness endpoints and data-freshness telemetry
 - GitHub CI
@@ -48,7 +48,9 @@ For production, use the included Render configuration instead of manually starti
 
 See [`docs/deploy-render.md`](docs/deploy-render.md).
 
-The production configuration uses a paid Render web service with a persistent disk. On first startup the application refreshes the DataSF dataset before serving traffic. If that first refresh fails, it refuses to publish demo/empty data. Later refresh failures preserve the last successful live snapshot.
+The production configuration uses a paid Render web service with a persistent disk. The Docker image builds and validates all three DataSF eras before deployment; the web server does not perform expensive imports. The daily GitHub Actions workflow `.github/workflows/refresh_inspections.yml` compares the current DataSF `data_loaded_at` revision with production `/api/health`. Only if DataSF has changed does it commit a refresh marker and dispatch CI on that commit. With Render set to **After CI Checks Pass**, successful checks initiate a new complete Docker build; failed fetch/validation leaves the previous deployment serving. No Socrata token or Render API key is required.
+
+Check `/api/health` for `last_sync`, `data_refreshed_at`, `data_age_days`, and `data_freshness`. DataSF is the structured inspection feed, not the full inspector-narrative report source; inspector comments remain separately sourced and require verified enrichment.
 
 ## Inspector comments
 

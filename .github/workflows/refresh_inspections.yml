@@ -1,0 +1,66 @@
+name: Refresh inspection data
+
+on:
+  schedule:
+    # Daily source revision check; full rebuild only when DataSF has changed.
+    - cron: "19 12 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild inspection data even if DataSF revision is unchanged"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: inspection-data-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+      - name: Compare DataSF revision with production
+        id: source
+        env:
+          FORCE_REFRESH: ${{ inputs.force || 'false' }}
+        run: python scripts/check_freshness.py
+      - name: Run regression tests before requesting a rebuild
+        if: steps.source.outputs.refresh_required == 'true'
+        run: |
+          bash -n run.sh
+          python -m compileall -q app.py backend scripts tests
+          pytest -q
+      - name: Commit data revision and dispatch CI on the new commit
+        if: steps.source.outputs.refresh_required == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/refresh_revision.json
+          git commit -m "Refresh official DataSF inspection snapshot"
+          git push origin HEAD:main
+          # GITHUB_TOKEN pushes intentionally do not trigger push-based workflows.
+          # workflow_dispatch is the documented exception; its successful checks
+          # allow Render's checksPass policy to deploy a fresh validated image.
+          curl --fail-with-body --silent --show-error --location \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/dispatches" \
+            -d '{"ref":"main"}'

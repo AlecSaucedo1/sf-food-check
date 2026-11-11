@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -38,14 +39,20 @@ COMPLETE_SYNC_BACKGROUND = os.getenv("COMPLETE_SYNC_BACKGROUND", "1" if ON_RENDE
 SYNC_INTERVAL_HOURS = max(1.0, float(os.getenv("SYNC_INTERVAL_HOURS", "24")))
 SYNC_START_DELAY_SECONDS = max(0.0, float(os.getenv("SYNC_START_DELAY_SECONDS", "8")))
 LEADERBOARD_REFRESH_ON_START = os.getenv("LEADERBOARD_REFRESH_ON_START", "1" if ON_RENDER else "0") == "1"
-APP_VERSION = "0.8.1"
+APP_VERSION = "0.8.2"
 
 
+@contextmanager
 def db():
+    # sqlite3.Connection.__exit__ commits, but does not close the file handle.
+    # Explicitly close each short-lived API connection after the response query.
     con = connect(DB_PATH)
-    if not USE_LIVE_DATA:
-        seed_demo(con, str(DEMO_PATH))
-    return con
+    try:
+        if not USE_LIVE_DATA:
+            seed_demo(con, str(DEMO_PATH))
+        yield con
+    finally:
+        con.close()
 
 
 def _violation_key(item: dict) -> tuple[str, str]:
@@ -266,6 +273,16 @@ def health():
         "observation_records": observations["observation_records"],
         "observation_coverage_pct": round((observations["inspections_with_observations"] / count) * 100, 1) if count else 0.0,
         "last_sync": sync,
+        "data_refreshed_at": sync.get("completed_at") if sync and sync.get("success") else None,
+        "data_age_days": (
+            round((datetime.now(timezone.utc) - datetime.fromisoformat(sync["completed_at"])).total_seconds() / 86400, 1)
+            if sync and sync.get("success") else None
+        ),
+        "data_freshness": (
+            "stale" if sync and sync.get("success") and
+            (datetime.now(timezone.utc) - datetime.fromisoformat(sync["completed_at"])).days > 45
+            else "current" if sync and sync.get("success") else "unknown"
+        ),
     }
 
 

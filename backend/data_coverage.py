@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import os
 import re
 from collections import defaultdict
@@ -35,6 +37,41 @@ def _facility_seed(name: Any, address: Any) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
+def _csv_field_key(value: str) -> str:
+    """Normalize downloadable CSV display headers into API field names."""
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+async def _fetch_dataset_bulk_csv(dataset_id: str, *, max_rows: int) -> list[dict[str, Any]]:
+    """Fallback to official Socrata bulk export when paginated SODA is throttled."""
+    origin = BASE_URL.split("/resource", 1)[0]
+    urls = (
+        f"{origin}/api/v3/views/{dataset_id}/export.csv?accessType=DOWNLOAD",
+        f"{origin}/api/views/{dataset_id}/rows.csv?accessType=DOWNLOAD",
+    )
+    last_error: Exception | None = None
+    async with httpx.AsyncClient(timeout=180, follow_redirects=True) as client:
+        for url in urls:
+            try:
+                response = await client.get(url, headers={
+                    "Accept": "text/csv,*/*;q=0.8",
+                    "User-Agent": "SFFoodCheck-archive-build/1.0",
+                })
+                response.raise_for_status()
+                reader = csv.DictReader(io.StringIO(response.content.decode("utf-8-sig")))
+                rows: list[dict[str, Any]] = []
+                for record in reader:
+                    if len(rows) >= max_rows:
+                        raise RuntimeError(f"Archive {dataset_id} exceeds max_rows={max_rows}")
+                    rows.append({_csv_field_key(key): value for key, value in record.items() if key})
+                if not rows or not any("inspection_id" in record for record in rows[:3]):
+                    raise RuntimeError(f"Archive {dataset_id} CSV missing required inspection_id")
+                return rows
+            except (httpx.HTTPError, UnicodeError, csv.Error, RuntimeError) as exc:
+                last_error = exc
+    raise RuntimeError(f"Both bulk CSV representations failed for {dataset_id}: {last_error}")
+
+
 async def _fetch_dataset(
     dataset_id: str,
     *,
@@ -44,27 +81,31 @@ async def _fetch_dataset(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     offset = 0
-    async with httpx.AsyncClient(timeout=90, follow_redirects=True) as client:
-        while offset < max_rows:
-            params = {
-                "$limit": str(min(page_size, max_rows - offset)),
-                "$offset": str(offset),
-                "$order": f"{order_field} DESC",
-            }
-            response = await client.get(
-                f"{BASE_URL}/{dataset_id}.json",
-                params=params,
-                headers=_headers(),
-            )
-            response.raise_for_status()
-            page = response.json()
-            if not isinstance(page, list):
-                raise RuntimeError(f"Unexpected DataSF response shape for {dataset_id}")
-            rows.extend(page)
-            if len(page) < int(params["$limit"]):
-                break
-            offset += len(page)
-    return rows
+    try:
+        async with httpx.AsyncClient(timeout=90, follow_redirects=True) as client:
+            while offset < max_rows:
+                params = {
+                    "$limit": str(min(page_size, max_rows - offset)),
+                    "$offset": str(offset),
+                    "$order": f"{order_field} DESC",
+                }
+                response = await client.get(
+                    f"{BASE_URL}/{dataset_id}.json",
+                    params=params,
+                    headers=_headers(),
+                )
+                response.raise_for_status()
+                page = response.json()
+                if not isinstance(page, list):
+                    raise RuntimeError(f"Unexpected DataSF response shape for {dataset_id}")
+                rows.extend(page)
+                if len(page) < int(params["$limit"]):
+                    return rows
+                offset += len(page)
+        raise RuntimeError(f"Archive {dataset_id} reached safety row cap; refusing incomplete data")
+    except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+        print(f"DataSF archive {dataset_id} SODA pagination unavailable ({exc}); trying bulk CSV", flush=True)
+        return await _fetch_dataset_bulk_csv(dataset_id, max_rows=max_rows)
 
 
 def _aggregate_2020(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

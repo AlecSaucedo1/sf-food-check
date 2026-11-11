@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
+import threading
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,26 @@ CREATE INDEX IF NOT EXISTS idx_inspections_permit ON inspections(permit_number);
 CREATE INDEX IF NOT EXISTS idx_inspections_date ON inspections(inspection_date DESC);
 CREATE INDEX IF NOT EXISTS idx_inspections_name ON inspections(dba COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_inspections_status ON inspections(facility_rating_status);
+CREATE INDEX IF NOT EXISTS idx_inspections_permit_date ON inspections(permit_number, inspection_date DESC, inspection_id DESC);
+
+-- One record per facility. Rebuilt transactionally during ingestion, rather than
+-- recalculating a 65,000-row window function on every search request.
+CREATE TABLE IF NOT EXISTS facility_latest (
+    permit_number TEXT PRIMARY KEY,
+    inspection_id TEXT NOT NULL,
+    dba TEXT NOT NULL,
+    street_address TEXT,
+    analysis_neighborhood TEXT,
+    facility_rating_status TEXT,
+    inspection_date TEXT,
+    violation_count INTEGER,
+    latitude REAL,
+    longitude REAL
+);
+CREATE INDEX IF NOT EXISTS idx_facility_latest_date ON facility_latest(inspection_date DESC);
+CREATE INDEX IF NOT EXISTS idx_facility_latest_status ON facility_latest(facility_rating_status);
+CREATE INDEX IF NOT EXISTS idx_facility_latest_neighborhood ON facility_latest(analysis_neighborhood);
+CREATE INDEX IF NOT EXISTS idx_facility_latest_geo ON facility_latest(latitude, longitude);
 
 CREATE TABLE IF NOT EXISTS report_enrichment (
     permit_number TEXT NOT NULL,
@@ -82,12 +104,65 @@ CREATE INDEX IF NOT EXISTS idx_sync_runs_completed ON sync_runs(completed_at DES
 """
 
 
+# Schema initialization is keyed to the actual SQLite file inode, not the
+# symlink path: an atomic deployment swap gets its own initialization.
+_SCHEMA_READY: set[tuple[int, int]] = set()
+_SCHEMA_LOCK = threading.Lock()
+
+
 def connect(db_path: str) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(db_path)
+    con = sqlite3.connect(db_path, timeout=15)
     con.row_factory = sqlite3.Row
-    con.executescript(SCHEMA)
-    return con
+    con.execute("PRAGMA busy_timeout=15000")
+    try:
+        # Every ':memory:' connection is a new database with no filesystem inode.
+        if db_path == ":memory:":
+            con.executescript(SCHEMA)
+            return con
+        stat = os.stat(db_path)
+        identity = (stat.st_dev, stat.st_ino)
+        if identity not in _SCHEMA_READY:
+            with _SCHEMA_LOCK:
+                if identity not in _SCHEMA_READY:
+                    con.executescript(SCHEMA)
+                    _SCHEMA_READY.add(identity)
+        return con
+    except Exception:
+        con.close()
+        raise
+
+
+def refresh_facility_latest(con: sqlite3.Connection) -> None:
+    """Rebuild the read-optimized facility index inside the active transaction."""
+    con.execute("DELETE FROM facility_latest")
+    con.execute("""
+        INSERT INTO facility_latest (
+          permit_number, inspection_id, dba, street_address, analysis_neighborhood,
+          facility_rating_status, inspection_date, violation_count, latitude, longitude
+        )
+        SELECT permit_number, inspection_id, dba, street_address, analysis_neighborhood,
+               facility_rating_status, inspection_date, violation_count, latitude, longitude
+        FROM (
+          SELECT permit_number, inspection_id, dba, street_address, analysis_neighborhood,
+                 facility_rating_status, inspection_date, violation_count, latitude, longitude,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY permit_number
+                   ORDER BY inspection_date DESC, inspection_id DESC
+                 ) AS row_number
+          FROM inspections
+        )
+        WHERE row_number = 1
+    """)
+
+
+def _ensure_facility_latest(con: sqlite3.Connection) -> None:
+    # Handles older local databases and import paths that do not yet maintain
+    # the derived index. Production bundles already populate it at build time.
+    if con.execute("SELECT 1 FROM facility_latest LIMIT 1").fetchone() is None:
+        if con.execute("SELECT 1 FROM inspections LIMIT 1").fetchone() is not None:
+            refresh_facility_latest(con)
+            con.commit()
 
 
 def _blank(value: Any) -> bool:
@@ -204,6 +279,7 @@ def upsert_inspections(con: sqlite3.Connection, rows: list[dict[str, Any]], *, c
             n["data_as_of"], n["raw_row_id"], n["source_notes"], json.dumps(n["raw"], ensure_ascii=False),
         ))
     if commit:
+        refresh_facility_latest(con)
         con.commit()
     return len(normalized)
 
@@ -214,6 +290,7 @@ def replace_inspections(con: sqlite3.Connection, rows: list[dict[str, Any]]) -> 
         con.execute("DELETE FROM violations")
         con.execute("DELETE FROM inspections")
         count = upsert_inspections(con, rows, commit=False)
+        refresh_facility_latest(con)
         con.commit()
         return count
     except Exception:
@@ -294,7 +371,33 @@ def _row_to_inspection(row: sqlite3.Row, con: sqlite3.Connection) -> dict[str, A
     return data
 
 
+def _listing_rows(con: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    """Fetch compact five-item history only for the facilities returned."""
+    output = []
+    for row in rows:
+        base = dict(row)
+        history = con.execute(
+            "SELECT facility_rating_status, inspection_date FROM inspections "
+            "WHERE permit_number=? ORDER BY inspection_date DESC, inspection_id DESC LIMIT 5",
+            (base["permit_number"],),
+        ).fetchall()
+        output.append({
+            "permit_number": base["permit_number"],
+            "dba": base["dba"],
+            "street_address": base["street_address"],
+            "analysis_neighborhood": base["analysis_neighborhood"],
+            "facility_rating_status": base["facility_rating_status"],
+            "inspection_date": base["inspection_date"],
+            "violation_count": base["violation_count"],
+            "latitude": base["latitude"],
+            "longitude": base["longitude"],
+            "history": [dict(h) for h in history],
+        })
+    return output
+
+
 def list_restaurants(con: sqlite3.Connection, q: str = "", status: str = "", neighborhood: str = "", limit: int = 50) -> list[dict[str, Any]]:
+    _ensure_facility_latest(con)
     where, params = [], []
     if q:
         where.append("(dba LIKE ? OR street_address LIKE ?)")
@@ -306,21 +409,12 @@ def list_restaurants(con: sqlite3.Connection, q: str = "", status: str = "", nei
         where.append("analysis_neighborhood = ?")
         params.append(neighborhood)
     clause = "WHERE " + " AND ".join(where) if where else ""
-    sql = f"""
-    WITH ranked AS (
-      SELECT *, ROW_NUMBER() OVER (PARTITION BY permit_number ORDER BY inspection_date DESC, inspection_id DESC) rn
-      FROM inspections {clause}
-    )
-    SELECT * FROM ranked WHERE rn=1 ORDER BY inspection_date DESC, dba COLLATE NOCASE LIMIT ?
-    """
-    rows = con.execute(sql, (*params, max(1, min(limit, 200)))).fetchall()
-    results = []
-    for row in rows:
-        base = dict(row)
-        history = con.execute("SELECT facility_rating_status, inspection_date FROM inspections WHERE permit_number=? ORDER BY inspection_date DESC LIMIT 5", (base["permit_number"],)).fetchall()
-        results.append({"permit_number": base["permit_number"], "dba": base["dba"], "street_address": base["street_address"], "analysis_neighborhood": base["analysis_neighborhood"], "facility_rating_status": base["facility_rating_status"], "inspection_date": base["inspection_date"], "violation_count": base["violation_count"], "latitude": base["latitude"], "longitude": base["longitude"], "history": [dict(h) for h in history]})
-    return results
-
+    rows = con.execute(
+        f"SELECT * FROM facility_latest {clause} "
+        "ORDER BY inspection_date DESC, dba COLLATE NOCASE LIMIT ?",
+        (*params, max(1, min(limit, 200))),
+    ).fetchall()
+    return _listing_rows(con, rows)
 
 def restaurant_detail(con: sqlite3.Connection, permit_number: str) -> dict[str, Any] | None:
     rows = con.execute("SELECT * FROM inspections WHERE permit_number=? ORDER BY inspection_date DESC, inspection_id DESC", (permit_number,)).fetchall()
@@ -332,14 +426,24 @@ def restaurant_detail(con: sqlite3.Connection, permit_number: str) -> dict[str, 
 
 
 def nearby(con: sqlite3.Connection, lat: float, lon: float, radius_km: float = 2.0, limit: int = 50) -> list[dict[str, Any]]:
-    items = list_restaurants(con, limit=200)
-    found = []
-    for item in items:
-        if item["latitude"] is None or item["longitude"] is None:
-            continue
-        d = _distance_km(lat, lon, item["latitude"], item["longitude"])
-        if d <= radius_km:
-            item = dict(item)
-            item["distance_km"] = round(d, 2)
-            found.append(item)
-    return sorted(found, key=lambda x: x["distance_km"])[:limit]
+    """Search every geocoded facility in the bounding box, not just the latest 200."""
+    _ensure_facility_latest(con)
+    delta_lat = radius_km / 111.1
+    cos_lat = max(0.01, abs(math.cos(math.radians(lat))))
+    delta_lon = radius_km / (111.1 * cos_lat)
+    rows = con.execute(
+        "SELECT * FROM facility_latest WHERE latitude BETWEEN ? AND ? "
+        "AND longitude BETWEEN ? AND ?",
+        (lat - delta_lat, lat + delta_lat, lon - delta_lon, lon + delta_lon),
+    ).fetchall()
+    located = []
+    for row in rows:
+        distance = _distance_km(lat, lon, row["latitude"], row["longitude"])
+        if distance <= radius_km:
+            located.append((distance, row))
+    located.sort(key=lambda pair: pair[0])
+    selected = located[:max(1, min(limit, 200))]
+    output = _listing_rows(con, [row for _, row in selected])
+    for item, (distance, _) in zip(output, selected):
+        item["distance_km"] = round(distance, 2)
+    return output
