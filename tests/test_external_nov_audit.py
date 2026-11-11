@@ -25,3 +25,4 @@ def test_live_site_freshness_and_latency():
         upstream = client.get(SOURCE, params={"$select":"count(*) as rows, max(inspection_date) as newest, max(data_loaded_at) as latest_load"})
         print("UPSTREAM", upstream.status_code, upstream.text[:1000], flush=True)
         assert upstream.status_code == 200
+        raise AssertionError("intentional diagnostic capture; temporary PR")
