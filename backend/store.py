@@ -116,6 +116,10 @@ def connect(db_path: str) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=15000")
     try:
+        # Every ':memory:' connection is a new database with no filesystem inode.
+        if db_path == ":memory:":
+            con.executescript(SCHEMA)
+            return con
         stat = os.stat(db_path)
         identity = (stat.st_dev, stat.st_ino)
         if identity not in _SCHEMA_READY:
