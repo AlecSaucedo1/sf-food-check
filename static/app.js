@@ -1,7 +1,27 @@
 const app=document.querySelector('#app');
 const state={route:'home',status:'',q:'',items:[],meta:null};
 const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const fmt=d=>d?new Intl.DateTimeFormat('en-US',{month:'short',day:'numeric',year:'numeric'}).format(new Date(d+'T12:00:00')):'Unknown date';
+function fmt(value){
+  // DataSF historical records occasionally contain missing, partial or invalid dates.
+  // Never pass an Invalid Date to Intl.DateTimeFormat; one malformed row otherwise
+  // prevents the entire list, leaderboard or restaurant detail view from rendering.
+  if(value==null)return 'Unknown date';
+  const text=String(value).trim();
+  const match=/^(\d{4})-(\d{1,2})-(\d{1,2})(?:T.*)?$/.exec(text);
+  if(!match)return 'Unknown date';
+  const year=Number(match[1]),month=Number(match[2]),day=Number(match[3]);
+  if(year<1900||year>2100||month<1||month>12||day<1||day>31)return 'Unknown date';
+  const parsed=new Date(Date.UTC(year,month-1,day,12));
+  if(!Number.isFinite(parsed.getTime())||parsed.getUTCFullYear()!==year||
+     parsed.getUTCMonth()!==month-1||parsed.getUTCDate()!==day)return 'Unknown date';
+  try{
+    return new Intl.DateTimeFormat('en-US',{
+      month:'short',day:'numeric',year:'numeric',timeZone:'UTC'
+    }).format(parsed);
+  }catch(_){
+    return 'Unknown date';
+  }
+}
 const cls=s=>s==='Pass'?'pass':s==='Conditional Pass'?'conditional':s==='Closure'?'closure':'unknown';
 const badge=s=>`<span class="badge ${cls(s)}">${esc(s||'Unknown')}</span>`;
 const riskCls=s=>String(s||'').toLowerCase().replace(/\s+/g,'-');
