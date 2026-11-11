@@ -7,6 +7,7 @@ import statistics
 import tempfile
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -127,15 +128,25 @@ def refresh_leaderboard_snapshot(db_path: str, *, model_version: str = RISK_MODE
         if os.path.exists(temp_name):
             os.unlink(temp_name)
     _CACHE.clear()
+    _read_snapshot_cached.cache_clear()
     return {"generated_at": generated_at, "facility_count": len(facilities), "path": str(output)}
 
 
 def _load_snapshot(snapshot_path: str) -> tuple[list[dict[str, Any]], str, str, bool] | None:
-    path = Path(snapshot_path)
-    if not path.exists():
-        return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        stat = Path(snapshot_path).stat()
+    except OSError:
+        return None
+    return _read_snapshot_cached(snapshot_path, stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=4)
+def _read_snapshot_cached(
+    snapshot_path: str, mtime_ns: int, byte_count: int
+) -> tuple[list[dict[str, Any]], str, str, bool] | None:
+    # Cache the parsed snapshot by file identity; reload on atomic publication.
+    try:
+        payload = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
         return None
     facilities = payload.get("facilities")
