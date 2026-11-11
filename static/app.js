@@ -7,7 +7,7 @@ function fmt(value){
   // prevents the entire list, leaderboard or restaurant detail view from rendering.
   if(value==null)return 'Unknown date';
   const text=String(value).trim();
-  const match=/^(\d{4})-(\d{1,2})-(\d{1,2})(?:T.*)?$/.exec(text);
+  const match=/^(\d{4})-(\d{1,2})-(\d{1,2})(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?)?$/.exec(text);
   if(!match)return 'Unknown date';
   const year=Number(match[1]),month=Number(match[2]),day=Number(match[3]);
   if(year<1900||year>2100||month<1||month>12||day<1||day>31)return 'Unknown date';
