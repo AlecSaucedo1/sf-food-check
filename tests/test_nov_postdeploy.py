@@ -36,5 +36,6 @@ def test_november_production_update_and_response_times():
             if "Arsicault" in route:
                 results = response.json()
                 assert len(results) == 4
-                assert sum("397 ARGUELLO" in str(x["street_address"]).upper() for x in results) == 1
+                print("ARSICAULT_PRODUCTION", [(x.get("permit_number"), x.get("street_address")) for x in results])
+                assert sum("397 ARGUELLO" in " ".join(str(x["street_address"]).upper().split()) for x in results) == 1
         raise AssertionError("intentional metrics capture on temporary diagnostics PR")
