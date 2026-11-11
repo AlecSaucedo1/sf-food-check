@@ -1,3 +1,4 @@
+const UI_BUILD='11';
 const app=document.querySelector('#app');
 const state={route:'home',status:'',q:'',items:[],meta:null};
 const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -28,7 +29,7 @@ const riskCls=s=>String(s||'').toLowerCase().replace(/\s+/g,'-');
 const inspectionCount=i=>Number(i.display_violation_count??i.violation_count??0);
 async function api(url){const r=await fetch(url,{cache:'no-store'});if(!r.ok)throw new Error(`Request failed (${r.status})`);return r.json()}
 function loading(){app.innerHTML='<section class="screen"><div class="skeleton hero-skeleton"></div><div class="skeleton card-skeleton"></div><div class="skeleton card-skeleton"></div></section>'}
-function errorView(e){app.innerHTML=`<section class="screen"><div class="notice"><strong>We couldn’t load inspection data.</strong><p>${esc(e.message)}</p><button class="primary" onclick="location.reload()">Try again</button></div></section>`}
+function errorView(e){app.innerHTML=`<section class="screen"><div class="notice"><strong>We couldn’t load inspection data.</strong><p>${esc(e.message)}</p><p class="muted-text">Web build ${UI_BUILD}</p><button class="primary" onclick="location.reload()">Try again</button></div></section>`}
 function setNav(route){document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.route===route))}
 function historyDots(h=[]){return `<div class="history" aria-label="Recent inspection outcomes">${h.slice(0,5).map(x=>`<span class="dot ${cls(x.facility_rating_status)}" title="${esc(x.facility_rating_status)} — ${fmt(x.inspection_date)}"></span>`).join('')}</div>`}
 function card(r){return `<button class="restaurant-card" data-permit="${esc(r.permit_number)}"><div class="card-top"><div><h3>${esc(r.dba)}</h3><p>${esc(r.street_address)}</p>${r.analysis_neighborhood?`<small>${esc(r.analysis_neighborhood)}</small>`:''}</div>${badge(r.facility_rating_status)}</div><div class="card-bottom"><span>Inspected ${fmt(r.inspection_date)}</span><span>${Number(r.violation_count||0)} violation${Number(r.violation_count||0)===1?'':'s'}</span>${historyDots(r.history)}</div></button>`}
@@ -51,5 +52,19 @@ async function leaders(){state.route='leaders';setNav('leaders');loading();try{c
 function about(){state.route='about';setNav('about');app.innerHTML=`<section class="screen"><div class="page-head"><p class="eyebrow">METHODOLOGY</p><h1>Built for context, not fear.</h1></div><div class="prose"><h2>Official status comes first</h2><p>Pass, Conditional Pass and Closure are San Francisco DPH outcomes. We do not replace or modify them.</p><h2>Foodborne Illness Risk Index</h2><p>The 0–100 index is our relative severity indicator for conditions observed during an inspection. Higher scores are assigned to findings that more directly create contamination, pathogen growth or pathogen survival pathways—such as sick-worker contamination, cross-contamination, unsafe cooking, temperature control failures and unsafe food sources.</p><p><strong>It is not a probability that a restaurant will make someone sick and it is not an official SFDPH score.</strong> When only a violation code is published without descriptive text, the site marks the assessment low-confidence rather than guessing what happened.</p><h2>Leaderboards</h2><p>Leaderboards use each facility’s most recent rated inspection within an 18-month window. Lower average risk is better. Chains need at least three distinct San Francisco locations and neighborhoods need at least 25 eligible restaurants. Cited violations that lack enough descriptive information to score reliably are excluded from comparative rankings instead of being treated as zero-risk.</p><h2>Readable violations</h2><p>We recover violation descriptions from the source inspection row, pair them with their codes, group technical findings into consumer categories and explain why they matter. The original published description remains available underneath each summary.</p><h2>Inspector comments</h2><p>Comments appear only when linked to an official report enrichment record. Missing comments stay missing—we do not generate them.</p><h2>Independent project</h2><p>SF Food Check is not affiliated with or endorsed by the City and County of San Francisco.</p></div></section>`}
 function route(name){({home,nearby,leaders,recent,about}[name]||home)()}
 document.querySelectorAll('[data-route]').forEach(b=>b.onclick=()=>{history.pushState({},'', '/');route(b.dataset.route)});document.querySelector('#aboutButton').onclick=()=>route('about');window.onpopstate=()=>location.pathname.startsWith('/restaurant/')?detail(decodeURIComponent(location.pathname.split('/').pop())):home();
-if('serviceWorker' in navigator)navigator.serviceWorker.register('/static/sw.js',{updateViaCache:'none'}).then(reg=>reg.update()).catch(()=>{});
+// Live inspection data must never be obscured by an outdated installed PWA shell.
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.getRegistrations()
+    .then(registrations=>Promise.all(registrations
+      .filter(registration=>registration.scope.startsWith(location.origin+'/'))
+      .map(registration=>registration.unregister())))
+    .catch(()=>{});
+}
+if('caches' in window){
+  caches.keys()
+    .then(keys=>Promise.all(keys
+      .filter(key=>key.startsWith('sf-food-check-'))
+      .map(key=>caches.delete(key))))
+    .catch(()=>{});
+}
 location.pathname.startsWith('/restaurant/')?detail(decodeURIComponent(location.pathname.split('/').pop())):home();

@@ -23,3 +23,12 @@ for(const [value,display] of [
   assert.equal(fmt(value),display,'Date mismatch: '+value);
 }
 console.log('Date-format regression tests passed');
+
+const html=fs.readFileSync('static/index.html','utf8');
+const sw=fs.readFileSync('static/sw.js','utf8');
+assert.match(html,/app\.js\?v=11/,'HTML must reference the new uncached app build');
+assert.match(html,/sf-food-check-build" content="11"/,'HTML exposes the frontend build');
+assert.match(source,/getRegistrations\(\)/,'Frontend must remove old service workers');
+assert.doesNotMatch(source,/serviceWorker\.register\(/,'Frontend must not install a caching service worker again');
+assert.doesNotMatch(sw,/caches\.match\(/,'Migration worker must not serve old cached assets');
+assert.match(sw,/registration\.unregister\(\)/,'Migration worker must retire itself');

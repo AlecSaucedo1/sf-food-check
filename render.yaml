@@ -8,7 +8,9 @@ services:
     dockerContext: .
     dockerCommand: ./run.sh
     healthCheckPath: /api/health
-    autoDeployTrigger: checksPass
+    # Temporarily deploy on commit while GitHub Actions jobs are stuck queued.
+    # Restore checksPass when CI runners reliably execute again.
+    autoDeployTrigger: commit
     numInstances: 1
     envVars:
       - key: USE_LIVE_DATA

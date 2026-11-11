@@ -39,7 +39,7 @@ COMPLETE_SYNC_BACKGROUND = os.getenv("COMPLETE_SYNC_BACKGROUND", "1" if ON_RENDE
 SYNC_INTERVAL_HOURS = max(1.0, float(os.getenv("SYNC_INTERVAL_HOURS", "24")))
 SYNC_START_DELAY_SECONDS = max(0.0, float(os.getenv("SYNC_START_DELAY_SECONDS", "8")))
 LEADERBOARD_REFRESH_ON_START = os.getenv("LEADERBOARD_REFRESH_ON_START", "1" if ON_RENDER else "0") == "1"
-APP_VERSION = "0.8.2"
+APP_VERSION = "0.8.3"
 
 
 @contextmanager
@@ -234,10 +234,13 @@ async def production_headers(request: Request, call_next):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Permissions-Policy", "geolocation=(self), camera=(), microphone=(), payment=(), usb=()")
     response.headers.setdefault("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
-    if request.url.path == "/static/sw.js":
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["X-SF-Food-Check-Version"] = APP_VERSION
+    if request.url.path == "/" or request.url.path.startswith("/restaurant/"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+    elif request.url.path == "/static/sw.js" or request.url.path.endswith(".js"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
     elif request.url.path.startswith("/api/"):
-        response.headers.setdefault("Cache-Control", "public, max-age=60, stale-while-revalidate=300")
+        response.headers.setdefault("Cache-Control", "no-store")
     elif request.url.path.startswith("/static/"):
         response.headers.setdefault("Cache-Control", "public, max-age=3600")
     return response
@@ -284,6 +287,13 @@ def health():
             else "current" if sync and sync.get("success") else "unknown"
         ),
     }
+
+
+@app.get("/api/version")
+def version():
+    """Safe deployment fingerprint; no database access required."""
+    commit = os.getenv("RENDER_GIT_COMMIT", "")
+    return {"app_version": APP_VERSION, "git_commit": commit[:12] if commit else None, "frontend_build": "11"}
 
 
 @app.get("/api/ready")
