@@ -15,25 +15,31 @@ The Blueprint provisions:
 - database at `/var/data/inspections.db`
 - `/api/health` health check
 - automatic deploys only after GitHub CI checks pass
-- a DataSF refresh at startup and every 24 hours
+- scheduled daily source-revision checks in GitHub Actions, triggering CI-gated rebuilds only when DataSF changes
 
 ## 2. Set the Socrata token
 
-`SOCRATA_APP_TOKEN` is marked `sync: false`, so Render will ask for it during Blueprint creation. Create an application token for the DataSF/Socrata API and paste only the token value into Render. Never commit the token to GitHub.
+A Socrata app token is optional. If you want to use one, set `SOCRATA_APP_TOKEN` privately in Render; never commit it to GitHub.
 
 The application can use the public endpoint without a token, but a token is recommended for a production service.
 
 ## 3. Deploy
 
-Apply the Blueprint. On first startup, `run.sh` downloads the current DataSF inspection dataset before Uvicorn starts.
+Apply the Blueprint. During the Docker build, `scripts/build_complete_bundle.py` fetches all three official inspection eras, deduplicates facilities across eras, builds the search index and leaderboard snapshot, and rejects incomplete data before Render switches deployments. At startup `run.sh` publishes this validated bundled database to the persistent disk before Uvicorn starts.
 
-Production deliberately fails closed: if the first live sync fails and no prior live database exists, the service exits instead of showing the repository's fictional demo records. On later sync failures, the last successful live database remains available.
+Production preserves the last successful database on new build failures and does not serve demo records in live mode.
+
+### Daily automatic refresh
+
+GitHub Actions workflow `.github/workflows/refresh_inspections.yml` checks the official current dataset's latest `data_loaded_at` timestamp every day. If newer than production's last successful sync, it runs regression tests, commits a data revision marker to `main`, and uses GitHub's `workflow_dispatch` to run CI on the bot-authored commit. This is necessary because regular `GITHUB_TOKEN` commits do not automatically start push workflows. The successful dispatched check triggers Render's **After CI Checks Pass** deployment, rebuilding all inspection eras outside the serving container.
+
+Repository Actions must permit `GITHUB_TOKEN` to write repository contents and dispatch workflows, and automation must be allowed to push to `main`. Keep Render's Auto-Deploy setting at **After CI Checks Pass**. Inspect GitHub Actions > Refresh inspection data for failures or run it manually using **Run workflow**. If automated bot pushes are blocked by branch protection, adjust the repository automation permission or use an authorized Render deploy hook instead.
 
 ## 4. Validate the deployment
 
 Visit these endpoints on the Render URL:
 
-- `/api/health` — should show `ok: true` and `demo_mode: false`
+- `/api/health` — should show `ok: true`, `demo_mode: false`, a successful recent `last_sync`, and `data_freshness: current`
 - `/api/ready` — should return HTTP 200
 - `/api/meta` — confirms the configured source and dataset ID
 - `/` — opens the mobile web app
